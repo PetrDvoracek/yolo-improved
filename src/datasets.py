@@ -15,56 +15,92 @@ import torch
 
 import PIL
 from src import utils
+import src.anchorbox
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 class PascalVOC(torch.utils.data.Dataset):
-    def __init__(self, csv_file, img_dir, label_dir, scale=208, n_anchors=1,transform=None):
+    def __init__(
+        self,
+        csv_file,
+        img_dir,
+        label_dir,
+        scale=208,
+        n_anchors=1,
+        resolution=416,
+        # transform=None
+    ):
         self.annotations = pd.read_csv(csv_file)
         self.img_dir = img_dir
         self.label_dir = label_dir
-        self.transform = transform
+        # self.transform = transform
         self.scale = scale
         self.n_anchors = n_anchors
+        self.res = resolution
+        anch_sizes = [0.75, 0.5, 0.25]
+        anch_ratios = [1, 2, 0.5]
+        anch_n = len(anch_sizes) + len(anch_ratios) - 1
+        self.anchors = src.anchorbox.multibox_prior(
+            sizes=anch_sizes, ratios=anch_ratios, imw=scale, imh=scale
+        ).reshape(scale, scale, anch_n, 4)
+        self.bbox_scale = torch.tensor((resolution, resolution, resolution, resolution))
 
     def __len__(self):
         return len(self.annotations)
 
     def __getitem__(self, index):
         label_path = os.path.join(self.label_dir, self.annotations.iloc[index, 1])
-        bboxes = np.roll(  # [class, x, y, w, h] -> [x, y, w, h, class]
-            np.loadtxt(fname=label_path, delimiter=" ", ndmin=2), 4, axis=1
-        ).tolist()
+
+        # [class, x, y, w, h]
+        gt_bboxes = np.loadtxt(
+            fname=label_path, delimiter=" ", ndmin=2, dtype=np.float32
+        )
+        gt_bboxes = torch.from_numpy(gt_bboxes)
+        # [class, xmin, ymin, xmax, ymax]
+        gt_bboxes[..., 1:] = src.anchorbox.box_center_to_corner(gt_bboxes[..., 1:])
+        # offsets, mask, classes = src.anchorbox.multibox_target(
+        #     self.anchors.reshape(1, -1, 4), gt_bboxes.unsqueeze(dim=0)
+        # )
+
         img_path = os.path.join(self.img_dir, self.annotations.iloc[index, 0])
-        image = np.array(Image.open(img_path).convert("RGB"))
+        image = Image.open(img_path).resize((self.res, self.res)).convert("RGB")
+        image = np.array(image)
+        image = torch.from_numpy(image).swapaxes(0, -1).to(torch.float32) / 255
 
-        if self.transform:
-            augmentations = self.transform(image=image, bboxes=bboxes)  # albumentations
-            image = augmentations["image"]
-            bboxes = augmentations["bboxes"]
+        label = torch.zeros(
+            *self.anchors.shape[:-1], 4 + 1 + 1, dtype=torch.float32
+        )  # position + objectness + class
+        # labels = []
+        for box in gt_bboxes:
+            box = box[None, 1:]
+            iou_with_anchors = src.anchorbox.box_iou(box, self.anchors.reshape(-1, 4))[
+                0
+            ]
+            iou_with_anchors = iou_with_anchors / iou_with_anchors.max()
+            anchor_mask = iou_with_anchors
+            anchor_mask[anchor_mask < 1.0] = 0.0
+            anchor_mask = anchor_mask.to(torch.uint8)
+            anchor_mask = anchor_mask.reshape(self.anchors.shape[:-1])
+            label[..., 4][anchor_mask.bool()] = 1.0
 
-        targets = torch.zeros(
-            3, self.scale, self.scale # 3 be
-        ) # p, w, h of the center
+            iou_indices = iou_with_anchors.argsort(descending=True, dim=0)
+            best_anchor = self.anchors.reshape(-1, 4)[iou_indices[0].item()]
 
-        # TODO make for more anchors
-        for box in bboxes:
-            x, y, _, _, class_label = box
+        # label[..., 0:4] = offsets.reshape(*self.anchors.shape[:-1], 4)
+        # label[..., 4] = mask.reshape(*self.anchors.shape[:-2], 1, 1)
+        # label[..., 5:] = torch.nn.functional.one_hot(classes, num_classes=20).reshape(
+        #     *self.anchors.shape[:-1], 20
+        # )
 
-            i, j = int(self.scale * y), int(self.scale * x)
-            box_taken = targets[0, i, j]
+        # if self.transform:
+        #     augmentations = self.transform(image=image, bboxes=bboxes)  # albumentations
+        #     image = augmentations["image"]
+        #     bboxes = augmentations["bboxes"]
 
-            if not box_taken:
-                targets[0, i, j] = 1
-                x_cell, y_cell = (
-                    self.scale * x - j,
-                    self.scale * y - i,
-                )  # both between [0, 1]
-                center_coordinates = torch.tensor([x_cell, y_cell])
-                targets[1:3, i, j] = center_coordinates
-
-        return image, targets
+        label = label.reshape(self.scale, self.scale, -1)
+        label = label.swapaxes(0, -1)
+        return image, label
 
 
 if __name__ == "__main__":
@@ -90,15 +126,21 @@ if __name__ == "__main__":
         csv_file="/home/pedro/datasets/PASCAL_VOC/100examples.csv",
         img_dir="/home/pedro/datasets/PASCAL_VOC/images",
         label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
-        transform=test_transforms,
     )
     data_loader = torch.utils.data.DataLoader(
         dataset=dataset,
-        batch_size=4,
-        num_workers=1,
+        batch_size=None,
+        num_workers=0,
         shuffle=False,
         drop_last=False,
     )
     for im, label in data_loader:
-        plt.imshow(utils.draw_centers(im[0], label[0]))
+        bbox = dataset.anchors[
+            label.swapaxes(0, -1).reshape(208, 208, 5, -1)[..., 4].bool()
+        ]
+        im = im.swapaxes(0, -1).numpy()
+        im = src.anchorbox.put_bboxes(
+            im, (bbox * dataset.bbox_scale).to(torch.int64).tolist()
+        )
+        plt.imshow(im)
         plt.show()

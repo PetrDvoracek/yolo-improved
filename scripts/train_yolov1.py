@@ -8,6 +8,7 @@ import wandb
 
 import warnings
 
+import src.datasets
 import src.utils
 import src.config
 import src.yolo
@@ -66,9 +67,10 @@ class Trainee(pl.LightningModule):
         self.criterion = src.loss.YoloLoss()
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(
-            self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        )
+        optimizer = torch.optim.Adadelta(self.model.parameters())
+        # optimizer = torch.optim.Adam(
+        #     self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        # )
         return optimizer
 
     def training_step(self, data, idx):
@@ -79,8 +81,19 @@ class Trainee(pl.LightningModule):
 
         if idx % 100 == 1:
             im = inputs[0].detach().cpu().swapaxes(0, -1).numpy()
-            gt = labels[0, 0].detach().cpu().swapaxes(0, -1).numpy()
-            pred = out[:, 0].argmax(axis=0).detach().cpu().numpy()
+
+            gt = labels[0].swapaxes(0, -1).reshape(208, 208, -1).sum(axis=-1)
+            gt = gt.to(torch.uint8).detach().cpu().numpy()
+
+            pred = out[0].swapaxes(0, -1).reshape(208, 208, 5, 6)[..., 4]
+            pred[pred > 0.9] = 1.0
+            pred[pred <= 0.9] = 0.0
+            pred = pred.sum(axis=-1)
+            pred[pred >= 1.0] = 1.0
+            pred[pred < 1.0] = 0.0
+
+            pred = pred.detach().cpu().numpy()
+
             log_image(im, gt, pred, name="train_images")
 
         return loss
@@ -101,11 +114,20 @@ class Trainee(pl.LightningModule):
 
 
 def main():
-    model = src.yolo.YOLOv3(num_classes=src.config.NUM_CLASSES).to(src.config.DEVICE)
+    DEVICE = "cuda"
+    model = src.yolo.YOLOv3(num_classes=1).to(DEVICE)
 
-    train_loader, test_loader, train_eval_loader = src.utils.get_loaders(
-        train_csv_path=src.config.DATASET + "/train.csv",
-        test_csv_path=src.config.DATASET + "/test.csv",
+    dataset = src.datasets.PascalVOC(
+        csv_file="/home/pedro/datasets/PASCAL_VOC/100examples.csv",
+        img_dir="/home/pedro/datasets/PASCAL_VOC/images",
+        label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
+    )
+    data_loader = torch.utils.data.DataLoader(
+        dataset=dataset,
+        batch_size=2,
+        num_workers=0,
+        shuffle=False,
+        drop_last=False,
     )
 
     trainee = Trainee(
@@ -121,8 +143,10 @@ def main():
     )
     wandb_logger = pl.loggers.WandbLogger(experiment=wandb_exp)
 
-    trainer = pl.Trainer(gpus=1, precision=16, logger=wandb_logger)
-    trainer.fit(trainee, train_loader, test_loader)
+    trainer = pl.Trainer(
+        gpus=1, precision=16, logger=wandb_logger, accumulate_grad_batches=16
+    )
+    trainer.fit(trainee, data_loader)
 
     # for epoch in range(src.config.NUM_EPOCHS):
     #     train_fn(train_loader, model, optimizer, loss_fn, scaler)
