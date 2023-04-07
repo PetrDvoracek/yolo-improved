@@ -17,6 +17,7 @@ import PIL
 from src import utils
 import src.anchorbox
 
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
@@ -68,24 +69,69 @@ class PascalVOC(torch.utils.data.Dataset):
         image = np.array(image)
         image = torch.from_numpy(image).swapaxes(0, -1).to(torch.float32) / 255
 
+        # offsets, mask, classes = src.anchorbox.multibox_target(
+        #     self.anchors.reshape(1, -1, 4), gt_bboxes.unsqueeze(dim=0)
+        # )
+        # offsets = offsets.reshape(self.scale, self.scale, 5, 4)
+
         label = torch.zeros(
             *self.anchors.shape[:-1], 4 + 1 + 1, dtype=torch.float32
         )  # position + objectness + class
-        # labels = []
-        for box in gt_bboxes:
-            box = box[None, 1:]
-            iou_with_anchors = src.anchorbox.box_iou(box, self.anchors.reshape(-1, 4))[
-                0
-            ]
-            iou_with_anchors = iou_with_anchors / iou_with_anchors.max()
-            anchor_mask = iou_with_anchors
-            anchor_mask[anchor_mask < 1.0] = 0.0
-            anchor_mask = anchor_mask.to(torch.uint8)
-            anchor_mask = anchor_mask.reshape(self.anchors.shape[:-1])
-            label[..., 4][anchor_mask.bool()] = 1.0
+        label = label.reshape(self.scale, self.scale, 5, -1)
+        for bbox in gt_bboxes:
+            box_cls = bbox[0]
+            cent_bbox = src.anchorbox.box_corner_to_center(bbox[1:].unsqueeze(0))[0]
+            c_x, c_y, w, h = cent_bbox
+            _, x1, y1, x2, y2 = bbox
+            grid_idx_x = int(c_x * self.scale)
+            grid_idx_y = int(c_y * self.scale)
+            cell_anchors = self.anchors[grid_idx_y, grid_idx_x]
+            ious = torchvision.ops.box_iou(cell_anchors, bbox[1:].unsqueeze(0))[0]
+            best_iou_anchor_idx = ious.argsort(descending=True)[0]
+            best_anchor = cell_anchors[best_iou_anchor_idx]
+            # offset = torch.tensor(
+            #     [
+            #         c_x - best_anchor[0],
+            #         c_y - best_anchor[1],
+            #         w - best_anchor[2],
+            #         h - best_anchor[3],
+            #     ]
+            # )
 
-            iou_indices = iou_with_anchors.argsort(descending=True, dim=0)
-            best_anchor = self.anchors.reshape(-1, 4)[iou_indices[0].item()]
+            # # offset = offsets[grid_idx_x, grid_idx_y, best_iou_anchor_idx]
+            # # offset = src.anchorbox.offset_boxes(
+            # #     best_anchor.unsqueeze(0), bbox.unsqueeze(0)
+            # # )[0]
+            # label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, :4] = offset
+            label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, 4] = 1.0
+            label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, 5] = box_cls.item()
+
+            # cls_id, x, y, w, h =
+
+        # label[..., :4] = offsets.reshape(1, 208, 208, 5, 4)
+        # label[..., 4:5] = classes.reshape(1, 208, 208, 5, 1)
+
+        # labels = []
+        # for box in gt_bboxes:
+        #     box = box[None, 1:]
+        #     iou_with_anchors = src.anchorbox.box_iou(box, self.anchors.reshape(-1, 4))[
+        #         0
+        #     ]
+        #     # best_iou = iou_with_anchors.max()
+        #     # anchor_candidate_idxs = (iou_with_anchors == best_iou).nonzero()
+        #     # anchors = self.anchors.reshape(-1,4)[anchor_candidate_idxs]
+        #     # diffs = torch.abs(box - anchors).sum(dim=-1)
+        #     # best_anchor_idx = diffs.argsort()[0]
+
+        #     iou_with_anchors = iou_with_anchors / iou_with_anchors.max()
+        #     anchor_mask = iou_with_anchors
+        #     anchor_mask[anchor_mask < 1.0] = 0.0
+        #     anchor_mask = anchor_mask.to(torch.uint8)
+        #     anchor_mask = anchor_mask.reshape(self.anchors.shape[:-1])
+        #     label[..., 4][anchor_mask.bool()] = 1.0
+
+        #     iou_indices = iou_with_anchors.argsort(descending=True, dim=0)
+        #     best_anchor = self.anchors.reshape(-1, 4)[iou_indices[0].item()]
 
         # label[..., 0:4] = offsets.reshape(*self.anchors.shape[:-1], 4)
         # label[..., 4] = mask.reshape(*self.anchors.shape[:-2], 1, 1)
@@ -99,12 +145,14 @@ class PascalVOC(torch.utils.data.Dataset):
         #     bboxes = augmentations["bboxes"]
 
         label = label.reshape(self.scale, self.scale, -1)
+        label = label.swapaxes(0,1) # somewhere is swaped x y axis... TODO
         label = label.swapaxes(0, -1)
         return image, label
 
 
 if __name__ == "__main__":
     IMAGE_SIZE = 416
+    SCALE = 26
     test_transforms = A.Compose(
         [
             A.LongestMaxSize(max_size=IMAGE_SIZE),
@@ -126,6 +174,7 @@ if __name__ == "__main__":
         csv_file="/home/pedro/datasets/PASCAL_VOC/100examples.csv",
         img_dir="/home/pedro/datasets/PASCAL_VOC/images",
         label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
+        scale=SCALE,
     )
     data_loader = torch.utils.data.DataLoader(
         dataset=dataset,
@@ -136,11 +185,13 @@ if __name__ == "__main__":
     )
     for im, label in data_loader:
         bbox = dataset.anchors[
-            label.swapaxes(0, -1).reshape(208, 208, 5, -1)[..., 4].bool()
+            label.swapaxes(0, -1).reshape(SCALE, SCALE, 5, -1)[..., 4].bool()
         ]
         im = im.swapaxes(0, -1).numpy()
         im = src.anchorbox.put_bboxes(
             im, (bbox * dataset.bbox_scale).to(torch.int64).tolist()
         )
-        plt.imshow(im)
-        plt.show()
+        if label[..., 4].sum() == 0:
+            print("now!")
+            plt.imshow(im)
+            plt.savefig("./tmp.png")

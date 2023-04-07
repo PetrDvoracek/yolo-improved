@@ -10,6 +10,8 @@ import warnings
 
 import src.datasets
 import src.utils
+import src.anchorbox
+
 import src.config
 import src.yolo
 import src.loss
@@ -19,36 +21,60 @@ warnings.filterwarnings("ignore")
 torch.backends.cudnn.benchmark = True
 
 
-def log_image(im, gt, pred, name):
+def log_image_with_boxes(im, gt, pred, name):
+    gt = torch.clip(gt, min=0.0)
+    pred = torch.clip(pred, min=0.0)
+    gt = gt.tolist()
+    pred = pred.tolist()
+    # gt = gt[gt.nonzero()]
+    # pred = pred[pred.nonzero()]
     wandb.log(
         {
             name: [
                 wandb.Image(
                     im,
-                    masks={
+                    boxes={
                         "predictions": {
-                            "mask_data": cv2.dilate(
-                                cv2.resize(
-                                    pred,
-                                    (416, 416),
-                                    interpolation=cv2.INTER_NEAREST,
-                                ).astype(np.uint8),
-                                kernel=np.ones((5, 5), np.uint8),
-                                iterations=4,
-                            ),
-                            "class_labels": {0: "bg", 1: "obj"},
+                            "box_data": [
+                                {
+                                    "position": {
+                                        "minX": x[0],
+                                        "maxX": x[2],
+                                        "minY": x[1],
+                                        "maxY": x[3],
+                                    },
+                                    "class_id": int(x[5]),
+                                    "box_caption": f"{src.config.PASCAL_CLASSES[int(x[5])]}",
+                                    "scores": {
+                                        "objectness": x[4],
+                                    },
+                                }
+                                for x in pred
+                            ],
+                            "class_labels": {
+                                i: k for i, k in enumerate(src.config.PASCAL_CLASSES)
+                            },
                         },
                         "ground_truth": {
-                            "mask_data": cv2.dilate(
-                                cv2.resize(
-                                    gt,
-                                    (416, 416),
-                                    interpolation=cv2.INTER_NEAREST,
-                                ).astype(np.uint8),
-                                kernel=np.ones((5, 5), np.uint8),
-                                iterations=4,
-                            ),
-                            "class_labels": {0: "bg", 1: "obj"},
+                            "box_data": [
+                                {
+                                    "position": {
+                                        "minX": x[0],
+                                        "maxX": x[2],
+                                        "minY": x[1],
+                                        "maxY": x[3],
+                                    },
+                                    "class_id": int(x[5]),
+                                    "box_caption": f"{src.config.PASCAL_CLASSES[int(x[5])]}",
+                                    "scores": {
+                                        "objectness": x[4],
+                                    },
+                                }
+                                for x in gt
+                            ],
+                            "class_labels": {
+                                i: k for i, k in enumerate(src.config.PASCAL_CLASSES)
+                            },
                         },
                     },
                 )
@@ -58,80 +84,132 @@ def log_image(im, gt, pred, name):
 
 
 class Trainee(pl.LightningModule):
-    def __init__(self, model, lr, weight_decay):
+    def __init__(self, model, lr, weight_decay, scale, anchors):
         super().__init__()
         self.model = model
         self.lr = lr
         self.weight_decay = weight_decay
+        self.scale = scale
+        self.anchors = anchors
 
         self.criterion = src.loss.YoloLoss()
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adadelta(self.model.parameters())
-        # optimizer = torch.optim.Adam(
-        #     self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        # )
+        # optimizer = torch.optim.Adadelta(self.model.parameters())
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
         return optimizer
 
-    def training_step(self, data, idx):
+    def _step(self, data, idx, stage):
         inputs, labels = data
         out = self.model(inputs)
-        loss = self.criterion(out, labels)
-        self.log("train_loss", loss.item())
+        loss = self.criterion(out, labels, self.anchors)
+        self.log(f"{stage}_loss", loss.item())
 
         if idx % 100 == 1:
             im = inputs[0].detach().cpu().swapaxes(0, -1).numpy()
 
-            gt = labels[0].swapaxes(0, -1).reshape(208, 208, -1).sum(axis=-1)
-            gt = gt.to(torch.uint8).detach().cpu().numpy()
+            pred = torch.sigmoid(out)
+            pred = pred[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
+            gt = labels[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
 
-            pred = out[0].swapaxes(0, -1).reshape(208, 208, 5, 6)[..., 4]
-            pred[pred > 0.9] = 1.0
-            pred[pred <= 0.9] = 0.0
-            pred = pred.sum(axis=-1)
-            pred[pred >= 1.0] = 1.0
-            pred[pred < 1.0] = 0.0
+            thresh = 0.8
+            mask = pred[..., 4]
+            mask[mask > thresh] = 1.0
+            mask[mask <= thresh] = 0.0
+            pred_boxes = self.anchors[mask.bool()]
+            pred_tensor = torch.zeros(len(pred_boxes), 4 + 1 + 1)
+            pred_tensor[..., :4] = pred_boxes
+            pred_tensor[..., 4] = pred[mask.bool()][..., 4]
+            pred_tensor[..., 5] = pred[mask.bool()][..., 5:].argmax(dim=-1)
 
-            pred = pred.detach().cpu().numpy()
+            mask = gt[..., 4]  # should already be {0.0, 1.0}
+            gt_boxes = self.anchors[mask.bool()]
+            gt_tensor = torch.zeros(len(gt_boxes), 4 + 1 + 1)
+            gt_tensor[..., :4] = gt_boxes
+            gt_tensor[..., 4] = gt[mask.bool()][..., 4]
+            gt_tensor[..., 5] = gt[mask.bool()][..., 5]
 
-            log_image(im, gt, pred, name="train_images")
+            log_image_with_boxes(
+                im,
+                gt_tensor,
+                pred_tensor,
+                name=f"{stage}_images_{thresh}",
+            )
 
         return loss
+
+    def training_step(self, data, idx):
+        return self._step(data, idx, stage="train")
 
     def validation_step(self, data, idx):
-        inputs, labels = data
-        out = self.model(inputs)
-        loss = self.criterion(out, labels)
-        self.log("val_loss", loss.item())
-
-        if idx % 100 == 1:
-            im = inputs[0].detach().cpu().swapaxes(0, -1).numpy()
-            gt = labels[0, 0].detach().cpu().swapaxes(0, -1).numpy()
-            pred = out[:, 0].argmax(axis=0).detach().cpu().numpy()
-            log_image(im, gt, pred, name="val_images")
-
-        return loss
+        return self._step(data, idx, stage="val")
 
 
 def main():
     DEVICE = "cuda"
+    SCALE = 13
+
     model = src.yolo.YOLOv3(num_classes=1).to(DEVICE)
 
-    dataset = src.datasets.PascalVOC(
+    debug_dataset = src.datasets.PascalVOC(
         csv_file="/home/pedro/datasets/PASCAL_VOC/100examples.csv",
         img_dir="/home/pedro/datasets/PASCAL_VOC/images",
         label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
+        scale=SCALE,
     )
-    data_loader = torch.utils.data.DataLoader(
-        dataset=dataset,
-        batch_size=2,
-        num_workers=0,
-        shuffle=False,
+    debug_dataloader = torch.utils.data.DataLoader(
+        dataset=debug_dataset,
+        batch_size=16,
+        num_workers=8,
+        shuffle=True,
         drop_last=False,
+        persistent_workers=True,
+        prefetch_factor=1,
+        pin_memory=True,
+    )
+
+    train_dataset = src.datasets.PascalVOC(
+        csv_file="/home/pedro/datasets/PASCAL_VOC/train.csv",
+        img_dir="/home/pedro/datasets/PASCAL_VOC/images",
+        label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
+        scale=SCALE,
+    )
+    train_dataloader = torch.utils.data.DataLoader(
+        dataset=train_dataset,
+        batch_size=16,
+        num_workers=8,
+        shuffle=True,
+        drop_last=False,
+        persistent_workers=True,
+        prefetch_factor=1,
+        pin_memory=True,
+    )
+
+    val_dataset = src.datasets.PascalVOC(
+        csv_file="/home/pedro/datasets/PASCAL_VOC/test.csv",
+        img_dir="/home/pedro/datasets/PASCAL_VOC/images",
+        label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
+        scale=SCALE,
+    )
+    val_dataloader = torch.utils.data.DataLoader(
+        dataset=val_dataset,
+        batch_size=16,
+        num_workers=8,
+        shuffle=True,
+        drop_last=False,
+        persistent_workers=True,
+        prefetch_factor=1,
+        pin_memory=True,
     )
 
     trainee = Trainee(
-        model, lr=src.config.LEARNING_RATE, weight_decay=src.config.WEIGHT_DECAY
+        model,
+        lr=src.config.LEARNING_RATE,
+        weight_decay=src.config.WEIGHT_DECAY,
+        scale=SCALE,
+        anchors=train_dataset.anchors.to(DEVICE),
     )
 
     wandb_exp = wandb.init(
@@ -144,37 +222,15 @@ def main():
     wandb_logger = pl.loggers.WandbLogger(experiment=wandb_exp)
 
     trainer = pl.Trainer(
-        gpus=1, precision=16, logger=wandb_logger, accumulate_grad_batches=16
+        gpus=1,
+        devices=[3],
+        precision=32,
+        logger=wandb_logger,
+        # accumulate_grad_batches=16,
+        log_every_n_steps=1,
     )
-    trainer.fit(trainee, data_loader)
-
-    # for epoch in range(src.config.NUM_EPOCHS):
-    #     train_fn(train_loader, model, optimizer, loss_fn, scaler)
-
-    #     if src.config.SAVE_MODEL:
-    #         src.utils.save_checkpoint(model, optimizer)
-
-    #     if epoch % 2 == 0 and epoch > 0:
-    #         print("on test loader:")
-    #         src.utils.check_class_accuracy(model, test_loader, threshold=src.config.CONF_THRESHOLD)
-
-    #         pred_boxes, true_boxes = src.utils.get_evaluation_bboxes(
-    #             test_loader,
-    #             model,
-    #             iou_threshold=src.config.NMS_IOU_THRESH,
-    #             anchors=src.config.ANCHORS,
-    #             threshold=src.config.CONF_THRESHOLD,
-    #         )
-
-    #         mapval = src.utils.mean_average_precision(
-    #             pred_boxes,
-    #             true_boxes,
-    #             iou_threshold=src.config.MAP_IOU_THRESH,
-    #             box_format="midpoint",
-    #             num_classes=src.config.NUM_CLASSES
-    #         )
-
-    #         print(f'mAP: {mapval.item()}')
+    trainer.fit(trainee, train_dataloader, val_dataloader)
+    # trainer.fit(trainee, debug_dataloader)
 
 
 if __name__ == "__main__":

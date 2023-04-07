@@ -5,7 +5,8 @@ import torch
 from albumentations.pytorch import ToTensorV2
 
 DATASET = '/home/pedro/datasets/PASCAL_VOC'
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = 'cuda:3'
 # seed_everything()  # If you want deterministic behavior
 NUM_WORKERS = 2
 BATCH_SIZE = 2
