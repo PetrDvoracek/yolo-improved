@@ -22,12 +22,10 @@ torch.backends.cudnn.benchmark = True
 
 
 def log_image_with_boxes(im, gt, pred, name):
-    gt = torch.clip(gt, min=0.0)
-    pred = torch.clip(pred, min=0.0)
+    # gt = torch.clip(gt, min=0.0)
+    # pred = torch.clip(pred, min=0.0)
     gt = gt.tolist()
     pred = pred.tolist()
-    # gt = gt[gt.nonzero()]
-    # pred = pred[pred.nonzero()]
     wandb.log(
         {
             name: [
@@ -110,17 +108,21 @@ class Trainee(pl.LightningModule):
         if idx % 100 == 1:
             im = inputs[0].detach().cpu().swapaxes(0, -1).numpy()
 
-            pred = torch.sigmoid(out)
-            pred = pred[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
+            pred = out[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
+            pred[..., 0:2] = torch.sigmoid(pred[..., 0:2])
+            pred[..., 2:4] = torch.exp(pred[..., 2:4])
+            pred[..., 4:] = torch.sigmoid(pred[..., 4:])
             gt = labels[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
 
             thresh = 0.8
             mask = pred[..., 4]
             mask[mask > thresh] = 1.0
             mask[mask <= thresh] = 0.0
-            pred_boxes = self.anchors[mask.bool()]
-            pred_tensor = torch.zeros(len(pred_boxes), 4 + 1 + 1)
-            pred_tensor[..., :4] = pred_boxes
+            pred_anchors = self.anchors[mask.bool()]
+            pred_boxes = pred[mask.bool()]
+            pred_tensor = torch.zeros(len(pred_anchors), 4 + 1 + 1)
+            pred_tensor[..., :2] = pred_anchors[..., :2]
+            pred_tensor[..., 2:4] = pred_anchors[..., 2:4] * pred_boxes[..., 2:4]
             pred_tensor[..., 4] = pred[mask.bool()][..., 4]
             pred_tensor[..., 5] = pred[mask.bool()][..., 5:].argmax(dim=-1)
 
@@ -161,7 +163,7 @@ def main():
     )
     debug_dataloader = torch.utils.data.DataLoader(
         dataset=debug_dataset,
-        batch_size=16,
+        batch_size=1,
         num_workers=8,
         shuffle=True,
         drop_last=False,
@@ -224,7 +226,7 @@ def main():
     trainer = pl.Trainer(
         gpus=1,
         devices=[3],
-        precision=32,
+        precision=16,
         logger=wandb_logger,
         # accumulate_grad_batches=16,
         log_every_n_steps=1,

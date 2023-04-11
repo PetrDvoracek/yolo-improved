@@ -11,6 +11,7 @@ class YoloLoss(torch.nn.Module):
         super().__init__()
         self.bce = torch.nn.BCEWithLogitsLoss()
         self.entropy = torch.nn.CrossEntropyLoss()
+        self.mse = torch.nn.MSELoss()
 
         self.lambda_class = 1
         self.lambda_noobj = 10
@@ -35,8 +36,13 @@ class YoloLoss(torch.nn.Module):
             (predictions[..., 5:][obj]),
             (target[..., 5][obj].long()),
         )
+
+        # w h loss
+        w_h_loss = self.mse(predictions[..., 2:4][obj], target[..., 2:4][obj])
+
         return (
             self.lambda_noobj * no_object_loss
             + self.lambda_obj * object_loss
             + self.lambda_class * class_loss
+            + self.lambda_box * w_h_loss
         )
