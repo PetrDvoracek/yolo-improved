@@ -229,8 +229,8 @@ def main():
         # accumulate_grad_batches=16,
         log_every_n_steps=1,
     )
-    trainer.fit(trainee, train_dataloader, val_dataloader)
-    # trainer.fit(trainee, debug_dataloader)
+    # trainer.fit(trainee, train_dataloader, val_dataloader)
+    trainer.fit(trainee, debug_dataloader)
 
 
 if __name__ == "__main__":

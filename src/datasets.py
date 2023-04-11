@@ -105,6 +105,10 @@ class PascalVOC(torch.utils.data.Dataset):
             # label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, :4] = offset
             label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, 4] = 1.0
             label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, 5] = box_cls.item()
+            offset_x_in_cell = (self.scale * c_x) % 1
+            offset_y_in_cell = (self.scale * c_y) % 1
+            offset_w = torch.log(w) / 0  # prior width TODO
+            offset_h = torch.log(h) / 0  # prior height TODO
 
             # cls_id, x, y, w, h =
 
@@ -145,7 +149,7 @@ class PascalVOC(torch.utils.data.Dataset):
         #     bboxes = augmentations["bboxes"]
 
         label = label.reshape(self.scale, self.scale, -1)
-        label = label.swapaxes(0,1) # somewhere is swaped x y axis... TODO
+        label = label.swapaxes(0, 1)  # somewhere is swaped x y axis... TODO
         label = label.swapaxes(0, -1)
         return image, label
 
