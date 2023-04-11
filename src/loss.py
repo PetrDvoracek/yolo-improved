@@ -38,7 +38,7 @@ class YoloLoss(torch.nn.Module):
         )
 
         # w h loss
-        w_h_loss = self.mse(predictions[..., 2:4][obj], target[..., 2:4][obj])
+        w_h_loss = self.mse(predictions[..., :4][obj], target[..., :4][obj])
 
         return (
             self.lambda_noobj * no_object_loss

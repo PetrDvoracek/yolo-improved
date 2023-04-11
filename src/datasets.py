@@ -105,13 +105,17 @@ class PascalVOC(torch.utils.data.Dataset):
             # label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, :4] = offset
             label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, 4] = 1.0
             label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, 5] = box_cls.item()
-            # offset_x_in_cell = (self.scale * c_x) % 1
-            # offset_y_in_cell = (self.scale * c_y) % 1
+            offset_x_in_cell = (self.scale * c_x) % 1
+            offset_y_in_cell = (self.scale * c_y) % 1
+            t_x = -torch.log((1 - offset_x_in_cell) / offset_x_in_cell)
+            t_y = -torch.log((1 - offset_y_in_cell) / offset_y_in_cell)
             anchor_w, anchor_h = best_anchor[2:4]
             t_w = torch.log(w / anchor_w)
             t_h = torch.log(h / anchor_h)
-            label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, 2:4] = torch.tensor(
+            label[grid_idx_x, grid_idx_y, best_iou_anchor_idx, :4] = torch.tensor(
                 [
+                    t_x,
+                    t_y,
                     t_w,
                     t_h,
                 ]

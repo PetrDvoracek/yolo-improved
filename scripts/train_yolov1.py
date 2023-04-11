@@ -110,9 +110,15 @@ class Trainee(pl.LightningModule):
 
             pred = out[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
             pred[..., 0:2] = torch.sigmoid(pred[..., 0:2])
+            x_grid, y_grid = torch.meshgrid(
+                torch.arange(pred.shape[0]), torch.arange(pred.shape[1])
+            )
+            x_grid = torch.stack([x_grid] * 5, axis=2).to(pred.device)
+            y_grid = torch.stack([y_grid] * 5, axis=2).to(pred.device)
+            pred[..., 0] = pred[..., 0] + x_grid / 13
+            pred[..., 1] = pred[..., 1] + y_grid / 13
             pred[..., 2:4] = torch.exp(pred[..., 2:4])
             pred[..., 4:] = torch.sigmoid(pred[..., 4:])
-            gt = labels[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
 
             thresh = 0.8
             mask = pred[..., 4]
@@ -121,11 +127,12 @@ class Trainee(pl.LightningModule):
             pred_anchors = self.anchors[mask.bool()]
             pred_boxes = pred[mask.bool()]
             pred_tensor = torch.zeros(len(pred_anchors), 4 + 1 + 1)
-            pred_tensor[..., :2] = pred_anchors[..., :2]
+            pred_tensor[..., :2] = pred_boxes[..., :2]
             pred_tensor[..., 2:4] = pred_anchors[..., 2:4] * pred_boxes[..., 2:4]
             pred_tensor[..., 4] = pred[mask.bool()][..., 4]
             pred_tensor[..., 5] = pred[mask.bool()][..., 5:].argmax(dim=-1)
 
+            gt = labels[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
             mask = gt[..., 4]  # should already be {0.0, 1.0}
             gt_boxes = self.anchors[mask.bool()]
             gt_tensor = torch.zeros(len(gt_boxes), 4 + 1 + 1)
