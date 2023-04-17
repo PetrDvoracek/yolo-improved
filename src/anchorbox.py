@@ -13,6 +13,20 @@ import src.utils
 # source: https://d2l.ai/chapter_computer-vision/anchor.html
 
 
+def assign_anchors_inverse(scale, label, threshold):
+    grid_x, grid_y = torch.meshgrid(
+        torch.arange(0, scale, 1), torch.arange(0, scale, 1)
+    )
+    grid_x = grid_x.to(label.device)
+    grid_y = grid_y.to(label.device)
+    label[..., 0] = label[..., 0] + grid_x.unsqueeze(-1) / scale
+    label[..., 1] = label[..., 1] + grid_y.unsqueeze(-1) / scale
+
+    boxes_from_labels = label[label[..., 4] >= threshold]
+
+    return boxes_from_labels
+
+
 def multibox_prior(sizes, ratios, imw, imh, device="cpu"):
     """Generate anchor boxes with different shapes centered on each pixel.
     sizes: respresents area
@@ -66,12 +80,11 @@ def multibox_prior(sizes, ratios, imw, imh, device="cpu"):
     return output.unsqueeze(0)
 
 
-def put_bboxes(im, bboxes):
+def put_bboxes(im, bboxes, color=(0, 255, 0)):
     """Show bounding boxes."""
 
-    h, w, _ = im.shape
     for box in bboxes:
-        im = cv2.rectangle(im, box[0:2], box[2:4], color=(0, 255, 0))
+        im = cv2.rectangle(im, box[0:2], box[2:4], color=color)
     return im
 
 

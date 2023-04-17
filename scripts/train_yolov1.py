@@ -81,6 +81,35 @@ def log_image_with_boxes(im, gt, pred, name):
     )
 
 
+def inverse_nn_output(out, scale, n_anch, anchors):
+    pred = out[0].swapaxes(0, -1).reshape(scale, scale, n_anch, -1)
+    pred[..., 0:2] = torch.sigmoid(pred[..., 0:2])
+    x_grid, y_grid = torch.meshgrid(
+        torch.arange(pred.shape[0]), torch.arange(pred.shape[1])
+    )
+    x_grid = torch.stack([x_grid] * 5, axis=2).to(pred.device)
+    y_grid = torch.stack([y_grid] * 5, axis=2).to(pred.device)
+    pred[..., 0] = pred[..., 0] + x_grid / x_grid.max()
+    pred[..., 1] = pred[..., 1] + y_grid / y_grid.max()
+    pred[..., 2:4] = torch.exp(pred[..., 2:4])
+    pred[..., 4:] = torch.sigmoid(pred[..., 4:])
+    return pred
+
+
+def postproc(pred, thresh, anchors):
+    mask = pred[..., 4]
+    mask[mask > thresh] = 1.0
+    mask[mask <= thresh] = 0.0
+    pred_anchors = anchors[mask.bool()]
+    pred_boxes = pred[mask.bool()]
+    pred_tensor = torch.zeros(len(pred_anchors), 4 + 1 + 1)
+    pred_tensor[..., :2] = pred_boxes[..., :2]
+    pred_tensor[..., 2:4] = pred_anchors[..., 2:4] * pred_boxes[..., 2:4]
+    pred_tensor[..., 4] = pred[mask.bool()][..., 4]
+    pred_tensor[..., 5] = pred[mask.bool()][..., 5:].argmax(dim=-1)
+    return pred_tensor
+
+
 class Trainee(pl.LightningModule):
     def __init__(self, model, lr, weight_decay, scale, anchors):
         super().__init__()
@@ -107,44 +136,87 @@ class Trainee(pl.LightningModule):
 
         if idx % 100 == 1:
             im = inputs[0].detach().cpu().swapaxes(0, -1).numpy()
+            label = (
+                labels[0]
+                .detach()
+                .cpu()
+                .swapaxes(0, -1)
+                .reshape(self.scale, self.scale, 5, -1)
+            )
+            label2show = label.detach().clone()
+            label_inversed = src.anchorbox.assign_anchors_inverse(
+                self.scale, label2show, threshold=1.0
+            )
+            label_inversed[..., :4] = src.anchorbox.box_center_to_corner(
+                label_inversed[..., :4]
+            )
+            # label_boxes = src.anchorbox.box_center_to_corner(label_boxes)
+
+            # im2show = src.anchorbox.put_bboxes(
+            #     np.ascontiguousarray(im * 255, dtype=np.uint8),
+            #     (label_boxes * im.shape[0])
+            #     .to(torch.int64)
+            #     .tolist(),  # TODO hardcoded im shape w h equal
+            # )
+            # wandb.log({"image": [wandb.Image(im2show)]})
 
             pred = out[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
-            pred[..., 0:2] = torch.sigmoid(pred[..., 0:2])
-            x_grid, y_grid = torch.meshgrid(
-                torch.arange(pred.shape[0]), torch.arange(pred.shape[1])
+            pred[..., 0:4] = torch.sigmoid(pred[..., 0:4])
+            pred2show = pred.detach().clone()
+            pred_inversed = src.anchorbox.assign_anchors_inverse(
+                self.scale, pred2show, threshold=0.6
             )
-            x_grid = torch.stack([x_grid] * 5, axis=2).to(pred.device)
-            y_grid = torch.stack([y_grid] * 5, axis=2).to(pred.device)
-            pred[..., 0] = pred[..., 0] + x_grid / 13
-            pred[..., 1] = pred[..., 1] + y_grid / 13
-            pred[..., 2:4] = torch.exp(pred[..., 2:4])
-            pred[..., 4:] = torch.sigmoid(pred[..., 4:])
+            pred_inversed[..., :4] = src.anchorbox.box_center_to_corner(
+                pred_inversed[..., :4]
+            )
+            # x_grid, y_grid = torch.meshgrid(
+            #     torch.arange(pred.shape[0]), torch.arange(pred.shape[1])
+            # )
+            # x_grid = torch.stack([x_grid] * 5, axis=2).to(pred.device)
+            # y_grid = torch.stack([y_grid] * 5, axis=2).to(pred.device)
+            # pred[..., 0] = pred[..., 0] + x_grid / 13
+            # pred[..., 1] = pred[..., 1] + y_grid / 13
+            # pred[..., 2:4] = torch.exp(pred[..., 2:4])
+            # pred[..., 4:] = torch.sigmoid(pred[..., 4:])
+            # thresh = 0.8
+            # pred = inverse_nn_output(
+            #     out, anchors=self.anchors, scale=self.scale, n_anch=5
+            # )
+            # pred_tensor = postproc(pred, thresh, self.anchors)
 
-            thresh = 0.8
-            mask = pred[..., 4]
-            mask[mask > thresh] = 1.0
-            mask[mask <= thresh] = 0.0
-            pred_anchors = self.anchors[mask.bool()]
-            pred_boxes = pred[mask.bool()]
-            pred_tensor = torch.zeros(len(pred_anchors), 4 + 1 + 1)
-            pred_tensor[..., :2] = pred_boxes[..., :2]
-            pred_tensor[..., 2:4] = pred_anchors[..., 2:4] * pred_boxes[..., 2:4]
-            pred_tensor[..., 4] = pred[mask.bool()][..., 4]
-            pred_tensor[..., 5] = pred[mask.bool()][..., 5:].argmax(dim=-1)
+            # thresh = 0.8
+            # mask = pred[..., 4]
+            # mask[mask > thresh] = 1.0
+            # mask[mask <= thresh] = 0.0
+            # pred_anchors = self.anchors[mask.bool()]
+            # pred_boxes = pred[mask.bool()]
+            # pred_tensor = torch.zeros(len(pred_anchors), 4 + 1 + 1)
+            # pred_tensor[..., :2] = pred_boxes[..., :2]
+            # pred_tensor[..., 2:4] = pred_anchors[..., 2:4] * pred_boxes[..., 2:4]
+            # pred_tensor[..., 4] = pred[mask.bool()][..., 4]
+            # pred_tensor[..., 5] = pred[mask.bool()][..., 5:].argmax(dim=-1)
 
-            gt = labels[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
-            mask = gt[..., 4]  # should already be {0.0, 1.0}
-            gt_boxes = self.anchors[mask.bool()]
-            gt_tensor = torch.zeros(len(gt_boxes), 4 + 1 + 1)
-            gt_tensor[..., :4] = gt_boxes
-            gt_tensor[..., 4] = gt[mask.bool()][..., 4]
-            gt_tensor[..., 5] = gt[mask.bool()][..., 5]
+            # gt = inverse_nn_output(
+            #     labels, anchors=self.anchors, scale=self.scale, n_anch=5
+            # )
+            # gt_tensor = postproc(gt, thresh, self.anchors)
+            # gt = labels[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
+            # mask = gt[..., 4]  # should already be {0.0, 1.0}
+            # gt_boxes = self.anchors[mask.bool()]
+            # gt_tensor = torch.zeros(len(gt_boxes), 4 + 1 + 1)
+            # gt_tensor = torch.zeros(label_boxes.shape[0], 6)
+            # gt_tensor[..., :4] = label_boxes
+            # gt_tensor[..., 4] = gt[mask.bool()][..., 4]
+            # gt_tensor[..., 5] = gt[mask.bool()][..., 5]
 
             log_image_with_boxes(
                 im,
-                gt_tensor,
-                pred_tensor,
-                name=f"{stage}_images_{thresh}",
+                label_inversed,
+                pred_inversed,
+                name=f"{stage}_images"
+                # gt_tensor,
+                # pred_tensor,
+                # name=f"{stage}_images_{thresh}",
             )
 
         return loss
