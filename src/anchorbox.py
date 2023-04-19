@@ -13,17 +13,21 @@ import src.utils
 # source: https://d2l.ai/chapter_computer-vision/anchor.html
 
 
-def assign_anchors_inverse(scale, label, threshold):
-    grid_x, grid_y = torch.meshgrid(
-        torch.arange(0, scale, 1), torch.arange(0, scale, 1)
+def transform_nn_output_to_coords(scale, out):
+    c_x, c_y = torch.meshgrid(
+        torch.arange(0, 1, 1 / scale), torch.arange(0, 1, 1 / scale)
     )
-    grid_x = grid_x.to(label.device)
-    grid_y = grid_y.to(label.device)
-    label[..., 0] = label[..., 0] + grid_x.unsqueeze(-1) / scale
-    label[..., 1] = label[..., 1] + grid_y.unsqueeze(-1) / scale
+    c_x = c_x.to(out.device)
+    c_y = c_y.to(out.device)
+    out[..., 0] = out[..., 0] + c_x.unsqueeze(-1)  # t_x
+    out[..., 1] = out[..., 1] + c_y.unsqueeze(-1)  # t_y
+    return out
+
+
+def assign_anchors_inverse(scale, label, threshold):
+    label = transform_nn_output_to_coords(scale, label)
 
     boxes_from_labels = label[label[..., 4] >= threshold]
-
     return boxes_from_labels
 
 

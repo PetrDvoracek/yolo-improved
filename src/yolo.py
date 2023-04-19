@@ -4,7 +4,7 @@ import torch.nn as nn
 from dataclasses import dataclass
 
 INPUT_SIZE = 416
-N_CLASSES = 0
+N_CLASSES = 20
 
 
 @dataclass
@@ -41,22 +41,22 @@ config = [
     HCStairstepUpscaleBlockConfig(
         in_channels_list=[128, 256, 512, 1024], out_channels=1024
     ),
-    # CNNBlockConfig(stride=1, out_channels=(4 + 1 + N_CLASSES), kernel_size=3),
-    CNNBlockConfig(
-        stride=2, out_channels=1024, kernel_size=3
-    ),  # 3: p, w, h of the center
-    CNNBlockConfig(
-        stride=2, out_channels=1024, kernel_size=3
-    ),  # 3: p, w, h of the center
-    CNNBlockConfig(
-        stride=2, out_channels=1024, kernel_size=3
-    ),  # 3: p, w, h of the center
-    CNNBlockConfig(
-        stride=2, out_channels=1024, kernel_size=3
-    ),  # 3: p, w, h of the center
-    CNNBlockConfig(
-        stride=1, out_channels=25*5, kernel_size=3
-    ),  # 3: p, w, h of the center
+    CNNBlockConfig(stride=1, out_channels=(4 + 1 + N_CLASSES) * 5, kernel_size=3),
+    # CNNBlockConfig(
+    #     stride=2, out_channels=1024, kernel_size=3
+    # ),  # 3: p, w, h of the center
+    # CNNBlockConfig(
+    #     stride=2, out_channels=1024, kernel_size=3
+    # ),  # 3: p, w, h of the center
+    # CNNBlockConfig(
+    #     stride=2, out_channels=1024, kernel_size=3
+    # ),  # 3: p, w, h of the center
+    # CNNBlockConfig(
+    #     stride=2, out_channels=1024, kernel_size=3
+    # ),  # 3: p, w, h of the center
+    # CNNBlockConfig(
+    #     stride=1, out_channels=25*5, kernel_size=3
+    # ),  # 3: p, w, h of the center
 ]
 
 

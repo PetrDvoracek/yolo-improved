@@ -27,6 +27,10 @@ def offset_wh(w, anchor_w):
     return torch.log(w / anchor_w)
 
 
+def inverse_offset_xy(offset_in_cell):
+    return
+
+
 class PascalVOC(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -105,8 +109,8 @@ class PascalVOC(torch.utils.data.Dataset):
         offset_y_in_cell = (self.scale * c_y) % 1
         # t_x = offset_xy(offset_x_in_cell)
         # t_y = offset_xy(offset_y_in_cell)
-        t_x = offset_x_in_cell / 26
-        t_y = offset_y_in_cell / 26
+        t_x = offset_x_in_cell / self.scale
+        t_y = offset_y_in_cell / self.scale
         # t_x = c_x
         # t_y = c_y
 

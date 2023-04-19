@@ -7,6 +7,7 @@ import tqdm
 import wandb
 
 import warnings
+import os
 
 import src.datasets
 import src.utils
@@ -19,6 +20,8 @@ import src.loss
 warnings.filterwarnings("ignore")
 
 torch.backends.cudnn.benchmark = True
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 def log_image_with_boxes(im, gt, pred, name):
@@ -119,7 +122,7 @@ class Trainee(pl.LightningModule):
         self.scale = scale
         self.anchors = anchors
 
-        self.criterion = src.loss.YoloLoss()
+        self.criterion = src.loss.YoloLoss(logfn=wandb.log)
 
     def configure_optimizers(self):
         # optimizer = torch.optim.Adadelta(self.model.parameters())
@@ -131,8 +134,18 @@ class Trainee(pl.LightningModule):
     def _step(self, data, idx, stage):
         inputs, labels = data
         out = self.model(inputs)
+
+        orig_shape = out.shape
+        out = out.swapaxes(1, -1).reshape(len(out), self.scale, self.scale, 5, -1)
+        out[..., :2] = out[..., :2] / self.scale
+        out = out.reshape(len(out), self.scale, self.scale, -1).swapaxes(1, -1)
+
         loss = self.criterion(out, labels, self.anchors)
         self.log(f"{stage}_loss", loss.item())
+        out_min = torch.sigmoid(out.detach())[:2].min().item()
+        label_min = torch.sigmoid(labels.detach())[:2].min().item()
+        self.log(f"min xy out", out_min)
+        self.log(f"min xy labels", label_min)
 
         if idx % 100 == 1:
             im = inputs[0].detach().cpu().swapaxes(0, -1).numpy()
@@ -160,54 +173,28 @@ class Trainee(pl.LightningModule):
             # )
             # wandb.log({"image": [wandb.Image(im2show)]})
 
-            pred = out[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
-            pred[..., 0:4] = torch.sigmoid(pred[..., 0:4])
+            pred = (
+                out[0].detach().swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
+            )
+            pred = pred.swapaxes(0, 1)
+            pred[..., 0:5] = torch.sigmoid(pred[..., 0:5])
+            pred[..., :2] = pred[..., :2] / self.scale
             pred2show = pred.detach().clone()
             pred_inversed = src.anchorbox.assign_anchors_inverse(
-                self.scale, pred2show, threshold=0.6
+                self.scale, pred2show, threshold=0.9  # do not log unnecessary
             )
             pred_inversed[..., :4] = src.anchorbox.box_center_to_corner(
                 pred_inversed[..., :4]
             )
-            # x_grid, y_grid = torch.meshgrid(
-            #     torch.arange(pred.shape[0]), torch.arange(pred.shape[1])
-            # )
-            # x_grid = torch.stack([x_grid] * 5, axis=2).to(pred.device)
-            # y_grid = torch.stack([y_grid] * 5, axis=2).to(pred.device)
-            # pred[..., 0] = pred[..., 0] + x_grid / 13
-            # pred[..., 1] = pred[..., 1] + y_grid / 13
-            # pred[..., 2:4] = torch.exp(pred[..., 2:4])
-            # pred[..., 4:] = torch.sigmoid(pred[..., 4:])
-            # thresh = 0.8
-            # pred = inverse_nn_output(
-            #     out, anchors=self.anchors, scale=self.scale, n_anch=5
-            # )
-            # pred_tensor = postproc(pred, thresh, self.anchors)
+            pred_inversed[..., 5] = pred_inversed[..., 5:].argmax(dim=-1)
 
-            # thresh = 0.8
-            # mask = pred[..., 4]
-            # mask[mask > thresh] = 1.0
-            # mask[mask <= thresh] = 0.0
-            # pred_anchors = self.anchors[mask.bool()]
-            # pred_boxes = pred[mask.bool()]
-            # pred_tensor = torch.zeros(len(pred_anchors), 4 + 1 + 1)
-            # pred_tensor[..., :2] = pred_boxes[..., :2]
-            # pred_tensor[..., 2:4] = pred_anchors[..., 2:4] * pred_boxes[..., 2:4]
-            # pred_tensor[..., 4] = pred[mask.bool()][..., 4]
-            # pred_tensor[..., 5] = pred[mask.bool()][..., 5:].argmax(dim=-1)
-
-            # gt = inverse_nn_output(
-            #     labels, anchors=self.anchors, scale=self.scale, n_anch=5
+            # im2show = src.anchorbox.put_bboxes(
+            #     np.ascontiguousarray(im * 255, dtype=np.uint8),
+            #     (pred_inversed * im.shape[0])
+            #     .to(torch.int64)
+            #     .tolist(),  # TODO hardcoded im shape w h equal
             # )
-            # gt_tensor = postproc(gt, thresh, self.anchors)
-            # gt = labels[0].swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
-            # mask = gt[..., 4]  # should already be {0.0, 1.0}
-            # gt_boxes = self.anchors[mask.bool()]
-            # gt_tensor = torch.zeros(len(gt_boxes), 4 + 1 + 1)
-            # gt_tensor = torch.zeros(label_boxes.shape[0], 6)
-            # gt_tensor[..., :4] = label_boxes
-            # gt_tensor[..., 4] = gt[mask.bool()][..., 4]
-            # gt_tensor[..., 5] = gt[mask.bool()][..., 5]
+            # wandb.log({"image": [wandb.Image(im2show)]})
 
             log_image_with_boxes(
                 im,
@@ -230,7 +217,7 @@ class Trainee(pl.LightningModule):
 
 def main():
     DEVICE = "cuda"
-    SCALE = 13
+    SCALE = 208
 
     model = src.yolo.YOLOv3(num_classes=1).to(DEVICE)
 
@@ -242,7 +229,7 @@ def main():
     )
     debug_dataloader = torch.utils.data.DataLoader(
         dataset=debug_dataset,
-        batch_size=1,
+        batch_size=32,
         num_workers=8,
         shuffle=True,
         drop_last=False,
@@ -285,14 +272,6 @@ def main():
         pin_memory=True,
     )
 
-    trainee = Trainee(
-        model,
-        lr=src.config.LEARNING_RATE,
-        weight_decay=src.config.WEIGHT_DECAY,
-        scale=SCALE,
-        anchors=train_dataset.anchors.to(DEVICE),
-    )
-
     wandb_exp = wandb.init(
         name="yolo",
         project="yolo",
@@ -302,9 +281,17 @@ def main():
     )
     wandb_logger = pl.loggers.WandbLogger(experiment=wandb_exp)
 
+    trainee = Trainee(
+        model,
+        lr=src.config.LEARNING_RATE,
+        weight_decay=src.config.WEIGHT_DECAY,
+        scale=SCALE,
+        anchors=train_dataset.anchors.to(DEVICE),
+    )
+
     trainer = pl.Trainer(
         gpus=1,
-        devices=[3],
+        devices=[1],
         precision=16,
         logger=wandb_logger,
         # accumulate_grad_batches=16,
