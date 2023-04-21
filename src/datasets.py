@@ -19,16 +19,16 @@ import src.anchorbox
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-def offset_xy(offset_in_cell):
-    return -torch.log((1 - offset_in_cell) / offset_in_cell)
+# def offset_xy(offset_in_cell):
+#     return -torch.log((1 - offset_in_cell) / offset_in_cell)
 
 
-def offset_wh(w, anchor_w):
-    return torch.log(w / anchor_w)
+# def offset_wh(w, anchor_w):
+#     return torch.log(w / anchor_w)
 
 
-def inverse_offset_xy(offset_in_cell):
-    return
+# def inverse_offset_xy(offset_in_cell):
+#     return
 
 
 class PascalVOC(torch.utils.data.Dataset):
@@ -77,7 +77,7 @@ class PascalVOC(torch.utils.data.Dataset):
             torch.from_numpy(image).swapaxes(0, -1).to(torch.float32) / 255
         )  # C x W x H
 
-        features_in_anchor = 4 + 1 + 1  # position + objectness + class + debug orig box
+        features_in_anchor = 4 + 1 + 1  # position + objectness + class
         label = torch.zeros(
             *self.anchors.shape[:-1], features_in_anchor, dtype=torch.float32
         )  # position + objectness + class
@@ -96,30 +96,24 @@ class PascalVOC(torch.utils.data.Dataset):
 
     def assign_box(self, label, cent_bbox, box_cls):
         cor_bbox = src.anchorbox.box_center_to_corner(cent_bbox.unsqueeze(0))[0]
-        c_x, c_y, w, h = cent_bbox
+        b_x, b_y, w, h = cent_bbox
 
-        cell_idx_x = int(c_x * self.scale)
-        cell_idx_y = int(c_y * self.scale)
-        cell_anchors = self.anchors[cell_idx_y, cell_idx_x]
+        c_x = int(b_x * self.scale)
+        c_y = int(b_y * self.scale)
+        cell_anchors = self.anchors[c_y, c_x]
         ious = torchvision.ops.box_iou(cell_anchors, cor_bbox.unsqueeze(0))[0]
         best_iou_anchor_idx = ious.argsort(descending=True)[0]
-        best_anchor = label[cell_idx_x, cell_idx_y, best_iou_anchor_idx]
+        best_anchor = self.anchors[c_x, c_y, best_iou_anchor_idx]
 
-        offset_x_in_cell = (self.scale * c_x) % 1
-        offset_y_in_cell = (self.scale * c_y) % 1
-        # t_x = offset_xy(offset_x_in_cell)
-        # t_y = offset_xy(offset_y_in_cell)
-        t_x = offset_x_in_cell / self.scale
-        t_y = offset_y_in_cell / self.scale
-        # t_x = c_x
-        # t_y = c_y
+        offset_x_in_cell = (self.scale * b_x) % 1
+        offset_y_in_cell = (self.scale * b_y) % 1
+        t_x = src.anchorbox.box_coords_center_to_pred(offset_x_in_cell)
+        t_y = src.anchorbox.box_coords_center_to_pred(offset_y_in_cell)
 
         anchor_w, anchor_h = best_anchor[2:4]
-        # t_w = offset_wh(w, anchor_w)
-        # t_h = offset_wh(h, anchor_h)
-        t_w = w
-        t_h = h
-        label[cell_idx_x, cell_idx_y, best_iou_anchor_idx, :4] = torch.tensor(
+        t_w = src.anchorbox.box_coords_size_to_pred(w, anchor_w)
+        t_h = src.anchorbox.box_coords_size_to_pred(h, anchor_h)
+        label[c_x, c_y, best_iou_anchor_idx, :4] = torch.tensor(
             [
                 t_x,
                 t_y,
@@ -127,8 +121,8 @@ class PascalVOC(torch.utils.data.Dataset):
                 t_h,
             ]
         )
-        label[cell_idx_x, cell_idx_y, best_iou_anchor_idx, 4] = 1.0
-        label[cell_idx_x, cell_idx_y, best_iou_anchor_idx, 5] = box_cls.item()
+        label[c_x, c_y, best_iou_anchor_idx, 4] = 1.0
+        label[c_x, c_y, best_iou_anchor_idx, 5] = box_cls.item()
         # debug
         # label[cell_idx_x, cell_idx_y, best_iou_anchor_idx, 6:] = cor_bbox
         return label
@@ -169,12 +163,21 @@ if __name__ == "__main__":
     )
     for im, label in data_loader:
         label = label.swapaxes(0, -1).reshape(SCALE, SCALE, 5, -1)
-        label_abs = label.detach().clone()
-        positive_boxes = src.anchorbox.assign_anchors_inverse(SCALE, label_abs)
+        scale = label.shape[1]
+        # positive_boxes = src.anchorbox.assign_anchors_inverse(SCALE, label_abs)
+        label = src.anchorbox.transform_nn_output_to_coords(
+            scale,
+            label,
+            dataset.anchors[..., 2],
+            dataset.anchors[..., 3],
+        )
+        positive_boxes = label[label[..., 4] == 1.0]
+        positive_boxes = src.anchorbox.box_center_to_corner(positive_boxes)
 
         im = im.swapaxes(0, -1).numpy()
         im = src.anchorbox.put_bboxes(
             im, (positive_boxes * dataset.res).to(torch.int64).tolist()
         )
         plt.imshow(im)
-        plt.show()
+        plt.savefig("./tmp.png")
+        # plt.show()

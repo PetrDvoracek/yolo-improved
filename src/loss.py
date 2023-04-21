@@ -38,6 +38,7 @@ class YoloLoss(torch.nn.Module):
         # ious = intersection_over_union(box_preds[obj], target[..., 1:5][obj]).detach()
         # object_loss = self.mse(self.sigmoid(predictions[..., 0:1][obj]), ious * target[..., 0:1][obj])
 
+        # object loss
         object_loss = self.bce(predictions[..., 4:5][obj], target[..., 4:5][obj])
         self.log({"object_l": object_loss.item()})
         # class loss
@@ -48,11 +49,14 @@ class YoloLoss(torch.nn.Module):
         self.log({"class_l": class_loss.item()})
 
         # coordinates
-        predictions[..., 0:4] = torch.sigmoid(predictions[..., 0:4])  # x,y coordinates
+        # predictions[..., 0:2] = torch.sigmoid(predictions[..., 0:2])  # x,y coordinates
         # target[..., 3:5] = torch.log(
         #     (1e-16 + target[..., 3:5] / anchors)
         # )  # width, height coordinates
-        box_loss = self.mse(predictions[..., 0:4][obj], target[..., 0:4][obj])
+        box_loss = self.mse(
+            predictions[..., 0:4][obj],
+            target[..., 0:4][obj],
+        )
         self.log({"coords_l": box_loss.item()})
 
         return (

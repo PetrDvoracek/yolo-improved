@@ -46,16 +46,16 @@ config = [
     #     stride=2, out_channels=1024, kernel_size=3
     # ),  # 3: p, w, h of the center
     # CNNBlockConfig(
-    #     stride=2, out_channels=1024, kernel_size=3
+    #     stride=2, out_channels=512, kernel_size=3
     # ),  # 3: p, w, h of the center
     # CNNBlockConfig(
-    #     stride=2, out_channels=1024, kernel_size=3
+    #     stride=2, out_channels=256, kernel_size=3
     # ),  # 3: p, w, h of the center
     # CNNBlockConfig(
-    #     stride=2, out_channels=1024, kernel_size=3
+    #     stride=2, out_channels=128, kernel_size=3
     # ),  # 3: p, w, h of the center
     # CNNBlockConfig(
-    #     stride=1, out_channels=25*5, kernel_size=3
+    #     stride=1, out_channels=(4 + 1 + N_CLASSES) * 5, kernel_size=3
     # ),  # 3: p, w, h of the center
 ]
 

@@ -2,6 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 import cv2
+import torchvision
 
 import os
 
@@ -13,22 +14,79 @@ import src.utils
 # source: https://d2l.ai/chapter_computer-vision/anchor.html
 
 
-def transform_nn_output_to_coords(scale, out):
-    c_x, c_y = torch.meshgrid(
-        torch.arange(0, 1, 1 / scale), torch.arange(0, 1, 1 / scale)
-    )
-    c_x = c_x.to(out.device)
-    c_y = c_y.to(out.device)
-    out[..., 0] = out[..., 0] + c_x.unsqueeze(-1)  # t_x
-    out[..., 1] = out[..., 1] + c_y.unsqueeze(-1)  # t_y
-    return out
+def sigmoid(x):
+    return 1 / (1 + torch.exp(-x))
 
 
-def assign_anchors_inverse(scale, label, threshold):
-    label = transform_nn_output_to_coords(scale, label)
+def inverse_sigmoid(x):
+    return torch.log(x / (1 - x))
 
-    boxes_from_labels = label[label[..., 4] >= threshold]
-    return boxes_from_labels
+
+def box_pred_center_to_coords(offset_in_cell, cell_idx, scale):
+    """see chapter 2.1 https://pjreddie.com/media/files/papers/YOLOv3.pdf"""
+    # return sigmoid(offset_in_cell) + cell_idx
+    return (1 / (1 + torch.exp(-torch.tensor(offset_in_cell))) + cell_idx) / scale
+
+
+def box_coords_center_to_pred(b, cell_idx=None):
+    """see chapter 2.1 https://pjreddie.com/media/files/papers/YOLOv3.pdf"""
+    # return inverse_sigmoid(b - cell_idx)
+    # return -torch.log(((b - cell_idx)/ (1-(cell_idx))))
+    if cell_idx is not None:
+        # b is offset in cell
+        b = b - cell_idx
+    eps = 1e-6
+    return torch.log(torch.tensor((b) / (1 - b)) + eps)
+
+
+def box_pred_size_to_coords(t, prior_anchor_size):
+    """see chapter 2.1 https://pjreddie.com/media/files/papers/YOLOv3.pdf"""
+    return prior_anchor_size * torch.exp(t)
+
+
+def box_coords_size_to_pred(size, prior_anchor_size):
+    """see chapter 2.1 https://pjreddie.com/media/files/papers/YOLOv3.pdf"""
+    eps = 1e-6
+    return torch.log(size / prior_anchor_size + eps)
+
+
+def transform_nn_output_to_coords(scale, label, anchor_p_w, anchor_p_h):
+    c_x, c_y = torch.meshgrid(torch.arange(0, scale, 1), torch.arange(0, scale, 1))
+    c_x = c_x.to(label.device).unsqueeze(-1)
+    c_y = c_y.to(label.device).unsqueeze(-1)
+
+    label[..., 0] = box_pred_center_to_coords(label[..., 0], c_x, scale)
+    label[..., 1] = box_pred_center_to_coords(label[..., 1], c_y, scale)
+    label[..., 2] = box_pred_size_to_coords(label[..., 2], anchor_p_w)
+    label[..., 3] = box_pred_size_to_coords(label[..., 3], anchor_p_h)
+    return label
+
+
+# def transform_coords_to_nn_output(scale, coords_center, anchors):
+#     coords_corner = box_center_to_corner(coords_center)
+
+#     c_x, c_y, w, h = coords_center
+#     cell_idx_x = int(c_x * scale)
+#     cell_idx_y = int(c_y * scale)
+#     cell_anchors = anchors[cell_idx_x, cell_idx_y]
+#     ious = torchvision.ops.box_iou(cell_anchors, coords_corner.unsqueeze(0))[0]
+#     best_iou_anchor_idx = ious.argsort(descending=True)[0]
+#     best_anchor = anchors[cell_idx_x, cell_idx_y, best_iou_anchor_idx]
+
+#     features_in_out = 4 + 1 + 1  # 4 spatial + objectness + class
+#     n_anchors = anchors.shape[2]
+#     nn_output_placehold = torch.zeros(scale, scale, n_anchors, features_in_out)
+#     pass  # TODO
+
+
+# def transform_coords_to_nn_output(scale, out):
+
+
+# def assign_anchors_inverse(scale, label, anchor_p_w, anchor_p_h, threshold):
+#     label = transform_nn_output_to_coords(scale, label, anchor_p_w, anchor_p_h)
+
+#     boxes_from_labels = label[label[..., 4] >= threshold]
+#     return boxes_from_labels
 
 
 def multibox_prior(sizes, ratios, imw, imh, device="cpu"):

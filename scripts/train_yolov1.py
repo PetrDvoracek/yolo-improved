@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore")
 
 torch.backends.cudnn.benchmark = True
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 
 def log_image_with_boxes(im, gt, pred, name):
@@ -116,6 +116,7 @@ def postproc(pred, thresh, anchors):
 class Trainee(pl.LightningModule):
     def __init__(self, model, lr, weight_decay, scale, anchors):
         super().__init__()
+        self.save_hyperparameters()
         self.model = model
         self.lr = lr
         self.weight_decay = weight_decay
@@ -125,10 +126,11 @@ class Trainee(pl.LightningModule):
         self.criterion = src.loss.YoloLoss(logfn=wandb.log)
 
     def configure_optimizers(self):
-        # optimizer = torch.optim.Adadelta(self.model.parameters())
-        optimizer = torch.optim.Adam(
-            self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        )
+        optimizer = torch.optim.Adadelta(self.model.parameters())
+        # optimizer = torch.optim.Adam(
+        #     self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        # )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5)
         return optimizer
 
     def _step(self, data, idx, stage):
@@ -136,16 +138,12 @@ class Trainee(pl.LightningModule):
         out = self.model(inputs)
 
         orig_shape = out.shape
-        out = out.swapaxes(1, -1).reshape(len(out), self.scale, self.scale, 5, -1)
-        out[..., :2] = out[..., :2] / self.scale
-        out = out.reshape(len(out), self.scale, self.scale, -1).swapaxes(1, -1)
+        # out = out.swapaxes(1, -1).reshape(len(out), self.scale, self.scale, 5, -1)
+        # out[..., :2] = out[..., :2] / self.scale
+        # out = out.reshape(len(out), self.scale, self.scale, -1).swapaxes(1, -1)
 
         loss = self.criterion(out, labels, self.anchors)
         self.log(f"{stage}_loss", loss.item())
-        out_min = torch.sigmoid(out.detach())[:2].min().item()
-        label_min = torch.sigmoid(labels.detach())[:2].min().item()
-        self.log(f"min xy out", out_min)
-        self.log(f"min xy labels", label_min)
 
         if idx % 100 == 1:
             im = inputs[0].detach().cpu().swapaxes(0, -1).numpy()
@@ -156,45 +154,37 @@ class Trainee(pl.LightningModule):
                 .swapaxes(0, -1)
                 .reshape(self.scale, self.scale, 5, -1)
             )
-            label2show = label.detach().clone()
-            label_inversed = src.anchorbox.assign_anchors_inverse(
-                self.scale, label2show, threshold=1.0
+            label2show = label.detach().clone().to(self.anchors.device)
+            label_inversed = src.anchorbox.transform_nn_output_to_coords(
+                self.scale, label2show, self.anchors[..., 2], self.anchors[..., 3]
             )
+            label_inversed = label_inversed[label_inversed[..., 4] == 1.0]
             label_inversed[..., :4] = src.anchorbox.box_center_to_corner(
                 label_inversed[..., :4]
             )
-            # label_boxes = src.anchorbox.box_center_to_corner(label_boxes)
-
-            # im2show = src.anchorbox.put_bboxes(
-            #     np.ascontiguousarray(im * 255, dtype=np.uint8),
-            #     (label_boxes * im.shape[0])
-            #     .to(torch.int64)
-            #     .tolist(),  # TODO hardcoded im shape w h equal
-            # )
-            # wandb.log({"image": [wandb.Image(im2show)]})
 
             pred = (
                 out[0].detach().swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
             )
-            pred = pred.swapaxes(0, 1)
-            pred[..., 0:5] = torch.sigmoid(pred[..., 0:5])
-            pred[..., :2] = pred[..., :2] / self.scale
-            pred2show = pred.detach().clone()
-            pred_inversed = src.anchorbox.assign_anchors_inverse(
-                self.scale, pred2show, threshold=0.9  # do not log unnecessary
+            # pred = pred.swapaxes(0, 1)
+            pred[..., 4] = torch.sigmoid(pred[..., 4])
+            # pred[..., :2] = pred[..., :2] / self.scale
+            pred2show = pred.detach().clone().to(self.anchors.device)
+            pred_inversed = src.anchorbox.transform_nn_output_to_coords(
+                self.scale,
+                pred2show,
+                self.anchors[..., 2],
+                self.anchors[..., 3],
+                # threshold=0.9,  # do not log unnecessar
             )
+            threshold = 0.7
+            pred_inversed = pred_inversed[pred_inversed[..., 4] > threshold]
+            # max_boxes = 20
+            # pred_inversed = pred_inversed[:20]
             pred_inversed[..., :4] = src.anchorbox.box_center_to_corner(
                 pred_inversed[..., :4]
             )
             pred_inversed[..., 5] = pred_inversed[..., 5:].argmax(dim=-1)
-
-            # im2show = src.anchorbox.put_bboxes(
-            #     np.ascontiguousarray(im * 255, dtype=np.uint8),
-            #     (pred_inversed * im.shape[0])
-            #     .to(torch.int64)
-            #     .tolist(),  # TODO hardcoded im shape w h equal
-            # )
-            # wandb.log({"image": [wandb.Image(im2show)]})
 
             log_image_with_boxes(
                 im,
@@ -204,6 +194,28 @@ class Trainee(pl.LightningModule):
                 # gt_tensor,
                 # pred_tensor,
                 # name=f"{stage}_images_{thresh}",
+            )
+
+            labeled_anchors = label.detach().clone().to(label.device)
+            labeled_anchors[..., :4] = self.anchors
+            labeled_anchors = labeled_anchors[labeled_anchors[..., 4] == 1.0]
+            labeled_anchors[..., :4] = src.anchorbox.box_center_to_corner(
+                labeled_anchors[..., :4]
+            )
+
+            pred_anchors = pred.detach().clone().to(pred.device)
+            pred_anchors[..., :4] = self.anchors
+            pred_anchors[..., 5] = pred_anchors[..., 5:].argmax(dim=-1)
+            pred_anchors = pred_anchors[pred[..., 4] > threshold]
+            pred_anchors[..., :4] = src.anchorbox.box_center_to_corner(
+                pred_anchors[..., :4]
+            )
+
+            log_image_with_boxes(
+                im,
+                labeled_anchors,
+                pred_anchors,
+                name=f"{stage}_anchors",
             )
 
         return loss
@@ -218,6 +230,7 @@ class Trainee(pl.LightningModule):
 def main():
     DEVICE = "cuda"
     SCALE = 208
+    # SCALE = 13
 
     model = src.yolo.YOLOv3(num_classes=1).to(DEVICE)
 
@@ -229,7 +242,7 @@ def main():
     )
     debug_dataloader = torch.utils.data.DataLoader(
         dataset=debug_dataset,
-        batch_size=32,
+        batch_size=16,
         num_workers=8,
         shuffle=True,
         drop_last=False,
@@ -291,11 +304,12 @@ def main():
 
     trainer = pl.Trainer(
         gpus=1,
-        devices=[1],
-        precision=16,
+        devices=[2],
+        precision=32,
         logger=wandb_logger,
         # accumulate_grad_batches=16,
         log_every_n_steps=1,
+        callbacks=[pl.callbacks.LearningRateMonitor()],
     )
     # trainer.fit(trainee, train_dataloader, val_dataloader)
     trainer.fit(trainee, debug_dataloader)
