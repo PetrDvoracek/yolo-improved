@@ -5,6 +5,8 @@ import torchvision
 import pytorch_lightning as pl
 import tqdm
 import wandb
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 import warnings
 import os
@@ -21,7 +23,7 @@ warnings.filterwarnings("ignore")
 
 torch.backends.cudnn.benchmark = True
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
 def log_image_with_boxes(im, gt, pred, name):
@@ -126,12 +128,18 @@ class Trainee(pl.LightningModule):
         self.criterion = src.loss.YoloLoss(logfn=wandb.log)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adadelta(self.model.parameters())
-        # optimizer = torch.optim.Adam(
-        #     self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        # )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5)
-        return optimizer
+        # optimizer = torch.optim.Adadelta(self.model.parameters())
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, factor=0.5, patience=50
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": scheduler,
+            "monitor": "train_loss",
+        }
 
     def _step(self, data, idx, stage):
         inputs, labels = data
@@ -142,10 +150,10 @@ class Trainee(pl.LightningModule):
         # out[..., :2] = out[..., :2] / self.scale
         # out = out.reshape(len(out), self.scale, self.scale, -1).swapaxes(1, -1)
 
-        loss = self.criterion(out, labels, self.anchors)
+        loss = self.criterion(out, labels, self.anchors, stage=stage)
         self.log(f"{stage}_loss", loss.item())
 
-        if idx % 100 == 1:
+        if idx % 1000 == 1:
             im = inputs[0].detach().cpu().swapaxes(0, -1).numpy()
             label = (
                 labels[0]
@@ -177,7 +185,7 @@ class Trainee(pl.LightningModule):
                 self.anchors[..., 3],
                 # threshold=0.9,  # do not log unnecessar
             )
-            threshold = 0.7
+            threshold = 0.5
             pred_inversed = pred_inversed[pred_inversed[..., 4] > threshold]
             # max_boxes = 20
             # pred_inversed = pred_inversed[:20]
@@ -186,36 +194,21 @@ class Trainee(pl.LightningModule):
             )
             pred_inversed[..., 5] = pred_inversed[..., 5:].argmax(dim=-1)
 
+            nms_reduced_pred = torchvision.ops.nms(
+                pred_inversed[..., :4],
+                scores=pred_inversed[..., 4],
+                iou_threshold=threshold,
+            )
+            pred_inversed = torch.index_select(pred_inversed, 0, nms_reduced_pred)
+
             log_image_with_boxes(
                 im,
                 label_inversed,
                 pred_inversed,
-                name=f"{stage}_images"
+                name=f"{stage}_images_nms"
                 # gt_tensor,
                 # pred_tensor,
                 # name=f"{stage}_images_{thresh}",
-            )
-
-            labeled_anchors = label.detach().clone().to(label.device)
-            labeled_anchors[..., :4] = self.anchors
-            labeled_anchors = labeled_anchors[labeled_anchors[..., 4] == 1.0]
-            labeled_anchors[..., :4] = src.anchorbox.box_center_to_corner(
-                labeled_anchors[..., :4]
-            )
-
-            pred_anchors = pred.detach().clone().to(pred.device)
-            pred_anchors[..., :4] = self.anchors
-            pred_anchors[..., 5] = pred_anchors[..., 5:].argmax(dim=-1)
-            pred_anchors = pred_anchors[pred[..., 4] > threshold]
-            pred_anchors[..., :4] = src.anchorbox.box_center_to_corner(
-                pred_anchors[..., :4]
-            )
-
-            log_image_with_boxes(
-                im,
-                labeled_anchors,
-                pred_anchors,
-                name=f"{stage}_anchors",
             )
 
         return loss
@@ -230,15 +223,40 @@ class Trainee(pl.LightningModule):
 def main():
     DEVICE = "cuda"
     SCALE = 208
+    RESOLUTION = 416
     # SCALE = 13
 
-    model = src.yolo.YOLOv3(num_classes=1).to(DEVICE)
-
+    debug_transform = A.Compose(
+        [
+            A.LongestMaxSize(max_size=RESOLUTION),
+            A.PadIfNeeded(
+                min_height=RESOLUTION,
+                min_width=RESOLUTION,
+                border_mode=cv2.BORDER_CONSTANT,
+            ),
+            # A.RandomCrop(32, padding=4),
+            # A.BBoxSafeRandomCrop(),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            A.OneOf([A.Rotate(30, interpolation=x) for x in [0, 2, 3]]),
+            A.Cutout(num_holes=30, max_h_size=24, max_w_size=24),
+            A.HorizontalFlip(),
+            A.Normalize(
+                mean=[0, 0, 0],
+                std=[1, 1, 1],
+                max_pixel_value=255,
+            ),
+            ToTensorV2(),
+        ],
+        bbox_params=A.BboxParams(
+            format="yolo", min_visibility=0.4, label_fields=["labels"]
+        ),
+    )
     debug_dataset = src.datasets.PascalVOC(
         csv_file="/home/pedro/datasets/PASCAL_VOC/100examples.csv",
         img_dir="/home/pedro/datasets/PASCAL_VOC/images",
         label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
         scale=SCALE,
+        transform=debug_transform,
     )
     debug_dataloader = torch.utils.data.DataLoader(
         dataset=debug_dataset,
@@ -251,11 +269,37 @@ def main():
         pin_memory=True,
     )
 
+    train_transform = A.Compose(
+        [
+            A.LongestMaxSize(max_size=RESOLUTION),
+            A.PadIfNeeded(
+                min_height=RESOLUTION,
+                min_width=RESOLUTION,
+                border_mode=cv2.BORDER_CONSTANT,
+            ),
+            # A.RandomCrop(32, padding=4),
+            # A.BBoxSafeRandomCrop(),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            A.OneOf([A.Rotate(10, interpolation=x) for x in [0, 2, 3]]),
+            A.Cutout(num_holes=30, max_h_size=24, max_w_size=24),
+            A.HorizontalFlip(),
+            A.Normalize(
+                mean=[0, 0, 0],
+                std=[1, 1, 1],
+                max_pixel_value=255,
+            ),
+            ToTensorV2(),
+        ],
+        bbox_params=A.BboxParams(
+            format="yolo", min_visibility=0.1, label_fields=["labels"]
+        ),
+    )
     train_dataset = src.datasets.PascalVOC(
         csv_file="/home/pedro/datasets/PASCAL_VOC/train.csv",
         img_dir="/home/pedro/datasets/PASCAL_VOC/images",
         label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
         scale=SCALE,
+        transform=train_transform,
     )
     train_dataloader = torch.utils.data.DataLoader(
         dataset=train_dataset,
@@ -268,11 +312,33 @@ def main():
         pin_memory=True,
     )
 
+    val_transform = A.Compose(
+        [
+            A.LongestMaxSize(max_size=RESOLUTION),
+            A.PadIfNeeded(
+                min_height=RESOLUTION,
+                min_width=RESOLUTION,
+                border_mode=cv2.BORDER_CONSTANT,
+            ),
+            A.Normalize(
+                mean=[0, 0, 0],
+                std=[1, 1, 1],
+                max_pixel_value=255,
+            ),
+            ToTensorV2(),
+        ],
+        bbox_params=A.BboxParams(
+            format="yolo", min_visibility=0.4, label_fields=["labels"]
+        ),
+    )
     val_dataset = src.datasets.PascalVOC(
         csv_file="/home/pedro/datasets/PASCAL_VOC/test.csv",
         img_dir="/home/pedro/datasets/PASCAL_VOC/images",
         label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
         scale=SCALE,
+        transform=val_transform,
+        anch_sizes=[0.7382153272628784, 0.061571717262268066, 0.343569815158844],
+        anch_ratios=[0.5068705081939697, 2.6602931022644043, 1.199582576751709],
     )
     val_dataloader = torch.utils.data.DataLoader(
         dataset=val_dataset,
@@ -286,7 +352,7 @@ def main():
     )
 
     wandb_exp = wandb.init(
-        name="yolo",
+        name="yolo-cls",
         project="yolo",
         entity="petrdvoracek",
         group="test",
@@ -294,13 +360,20 @@ def main():
     )
     wandb_logger = pl.loggers.WandbLogger(experiment=wandb_exp)
 
-    trainee = Trainee(
-        model,
-        lr=src.config.LEARNING_RATE,
-        weight_decay=src.config.WEIGHT_DECAY,
-        scale=SCALE,
-        anchors=train_dataset.anchors.to(DEVICE),
-    )
+    # pretrained_model = "./pretrained/epoch=0-step=1035.ckpt"
+    pretrained_model = ""
+    try:
+        trainee = Trainee.load_from_checkpoint(pretrained_model)
+    except:
+        print("! could not load pretrained model !")
+        model = src.yolo.YOLOv3(num_classes=1).to(DEVICE)
+        trainee = Trainee(
+            model,
+            lr=src.config.LEARNING_RATE,
+            weight_decay=src.config.WEIGHT_DECAY,
+            scale=SCALE,
+            anchors=train_dataset.anchors.to(DEVICE),
+        )
 
     trainer = pl.Trainer(
         gpus=1,
@@ -309,10 +382,14 @@ def main():
         logger=wandb_logger,
         # accumulate_grad_batches=16,
         log_every_n_steps=1,
-        callbacks=[pl.callbacks.LearningRateMonitor()],
+        callbacks=[
+            pl.callbacks.LearningRateMonitor(),
+            pl.callbacks.ModelCheckpoint(dirpath="./pretrained", monitor="val_loss"),
+        ],
+        max_epochs=10_000,
     )
-    # trainer.fit(trainee, train_dataloader, val_dataloader)
-    trainer.fit(trainee, debug_dataloader)
+    trainer.fit(trainee, train_dataloader, val_dataloader)
+    # trainer.fit(trainee, debug_dataloader)
 
 
 if __name__ == "__main__":

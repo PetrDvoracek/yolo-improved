@@ -40,17 +40,19 @@ class PascalVOC(torch.utils.data.Dataset):
         scale=208,
         n_anchors=1,
         resolution=416,
-        # transform=None
+        transform=None,
+        anch_sizes=[0.75, 0.5, 0.25],
+        anch_ratios=[1, 2, 0.5]
     ):
         self.annotations = pd.read_csv(csv_file)
         self.img_dir = img_dir
         self.label_dir = label_dir
-        # self.transform = transform
+        self.transform = transform
         self.scale = scale
         self.n_anchors = n_anchors
         self.res = resolution
-        anch_sizes = [0.75, 0.5, 0.25]
-        anch_ratios = [1, 2, 0.5]
+        anch_sizes = anch_sizes
+        anch_ratios = anch_ratios
         anch_n = len(anch_sizes) + len(anch_ratios) - 1
         self.anchors = src.anchorbox.multibox_prior(
             sizes=anch_sizes, ratios=anch_ratios, imw=scale, imh=scale
@@ -73,9 +75,21 @@ class PascalVOC(torch.utils.data.Dataset):
         image = Image.open(img_path)
         image = image.resize((self.res, self.res)).convert("RGB")
         image = np.array(image)  # H x W x C
-        image = (
-            torch.from_numpy(image).swapaxes(0, -1).to(torch.float32) / 255
-        )  # C x W x H
+        if self.transform is not None:
+            augmentations = self.transform(
+                image=image, bboxes=gt_bboxes[..., 1:], labels=gt_bboxes[..., 0]
+            )
+            image = augmentations["image"]
+            boxes = augmentations["bboxes"]
+            labels = augmentations["labels"]
+            aug_boxes = torch.zeros(len(boxes), 5)
+            aug_boxes[..., 0] = torch.tensor(labels)
+            aug_boxes[..., 1:] = torch.tensor(boxes)
+        gt_bboxes = aug_boxes
+        # image = (
+        #     torch.from_numpy(image).swapaxes(0, -1).to(torch.float32) / 255
+        # )  # C x W x H
+        image = image.swapaxes(1, 2)
 
         features_in_anchor = 4 + 1 + 1  # position + objectness + class
         label = torch.zeros(
@@ -84,10 +98,6 @@ class PascalVOC(torch.utils.data.Dataset):
         label = label.reshape(self.scale, self.scale, 5, -1)
         for cent_bbox in gt_bboxes:
             label = self.assign_box(label, cent_bbox[1:], box_cls=cent_bbox[0])
-        # if self.transform:
-        #     augmentations = self.transform(image=image, bboxes=bboxes)  # albumentations
-        #     image = augmentations["image"]
-        #     bboxes = augmentations["bboxes"]
 
         label = label.reshape(self.scale, self.scale, -1)
         # label = label.swapaxes(0, 1)  # somewhere is swaped x y axis... TODO

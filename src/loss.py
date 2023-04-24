@@ -5,6 +5,8 @@ import src.anchorbox
 
 # from utils import intersection_over_union
 
+SCALE = 208
+
 
 class YoloLoss(torch.nn.Module):
     def __init__(self, logfn):
@@ -19,18 +21,22 @@ class YoloLoss(torch.nn.Module):
         self.lambda_obj = 1
         self.lambda_box = 10
 
-    def forward(self, predictions, target, anchors):
+    def forward(self, predictions, target, anchors, stage):
         anchors = anchors.to(predictions.device)
         batch_size = predictions.shape[0]
+
         target = target.swapaxes(1, -1).reshape(-1, 6)
         predictions = predictions.swapaxes(1, -1).reshape(-1, 25)
         anchors = anchors.swapaxes(1, -1).reshape(-1, 4).repeat(batch_size, 1)
+        # predictions_coords = src.anchorbox.transform_nn_output_to_coords(
+        #     SCALE, predictions[...,:], anchor_p_w=anchors[..., 2], anchor_p_h=anchors[..., 3]
+        # )
         obj = target[..., 4] == 1
         noobj = target[..., 4] == 0
 
         # noobject loss
         no_object_loss = self.bce(predictions[..., 4:5][noobj], target[..., 4:5][noobj])
-        self.log({"no_object_l": no_object_loss.item()})
+        self.log({f"{stage}_no_object_l": no_object_loss.item()})
         # object loss
 
         # anchors = anchors.reshape(1, 3, 1, 1, 2)
@@ -40,13 +46,14 @@ class YoloLoss(torch.nn.Module):
 
         # object loss
         object_loss = self.bce(predictions[..., 4:5][obj], target[..., 4:5][obj])
-        self.log({"object_l": object_loss.item()})
+        # get iou
+        self.log({f"{stage}_object_l": object_loss.item()})
         # class loss
         class_loss = self.entropy(
             (predictions[..., 5:][obj]),
             (target[..., 5][obj].long()),
         )
-        self.log({"class_l": class_loss.item()})
+        self.log({f"{stage}_class_l": class_loss.item()})
 
         # coordinates
         # predictions[..., 0:2] = torch.sigmoid(predictions[..., 0:2])  # x,y coordinates
@@ -57,7 +64,7 @@ class YoloLoss(torch.nn.Module):
             predictions[..., 0:4][obj],
             target[..., 0:4][obj],
         )
-        self.log({"coords_l": box_loss.item()})
+        self.log({f"{stage}_coords_l": box_loss.item()})
 
         return (
             self.lambda_noobj * no_object_loss
