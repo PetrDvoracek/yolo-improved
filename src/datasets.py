@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import cv2
+from functools import lru_cache
 
 from PIL import Image, ImageFile
 
@@ -18,6 +19,7 @@ import src.anchorbox
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+N_ANCHORS = 9
 
 # def offset_xy(offset_in_cell):
 #     return -torch.log((1 - offset_in_cell) / offset_in_cell)
@@ -42,7 +44,7 @@ class PascalVOC(torch.utils.data.Dataset):
         resolution=416,
         transform=None,
         anch_sizes=[0.75, 0.5, 0.25],
-        anch_ratios=[1, 2, 0.5]
+        anch_ratios=[1, 2, 0.5],
     ):
         self.annotations = pd.read_csv(csv_file)
         self.img_dir = img_dir
@@ -62,6 +64,13 @@ class PascalVOC(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.annotations)
 
+    @staticmethod
+    # @lru_cache(maxsize=50_000)
+    def load_image(path):
+        image = Image.open(path)
+        image = image.resize((416, 416)).convert("RGB")
+        return np.array(image)  # H x W x C
+
     def __getitem__(self, index):
         label_path = os.path.join(self.label_dir, self.annotations.iloc[index, 1])
 
@@ -71,10 +80,12 @@ class PascalVOC(torch.utils.data.Dataset):
         )
         gt_bboxes = torch.from_numpy(gt_bboxes)
 
-        img_path = os.path.join(self.img_dir, self.annotations.iloc[index, 0])
-        image = Image.open(img_path)
-        image = image.resize((self.res, self.res)).convert("RGB")
-        image = np.array(image)  # H x W x C
+        im_path = os.path.join(self.img_dir, self.annotations.iloc[index, 0])
+        image = PascalVOC.load_image(im_path)
+        # img_path = os.path.join(self.img_dir, self.annotations.iloc[index, 0])
+        # image = Image.open(img_path)
+        # image = image.resize((self.res, self.res)).convert("RGB")
+        # image = np.array(image)  # H x W x C
         if self.transform is not None:
             augmentations = self.transform(
                 image=image, bboxes=gt_bboxes[..., 1:], labels=gt_bboxes[..., 0]
@@ -82,9 +93,12 @@ class PascalVOC(torch.utils.data.Dataset):
             image = augmentations["image"]
             boxes = augmentations["bboxes"]
             labels = augmentations["labels"]
-            aug_boxes = torch.zeros(len(boxes), 5)
-            aug_boxes[..., 0] = torch.tensor(labels)
-            aug_boxes[..., 1:] = torch.tensor(boxes)
+            if len(boxes) == 0:
+                aug_boxes = []
+            else:
+                aug_boxes = torch.zeros(len(boxes), 5)
+                aug_boxes[..., 0] = torch.tensor(labels)
+                aug_boxes[..., 1:] = torch.tensor(boxes)
         gt_bboxes = aug_boxes
         # image = (
         #     torch.from_numpy(image).swapaxes(0, -1).to(torch.float32) / 255
@@ -95,7 +109,7 @@ class PascalVOC(torch.utils.data.Dataset):
         label = torch.zeros(
             *self.anchors.shape[:-1], features_in_anchor, dtype=torch.float32
         )  # position + objectness + class
-        label = label.reshape(self.scale, self.scale, 5, -1)
+        label = label.reshape(self.scale, self.scale, N_ANCHORS, -1)
         for cent_bbox in gt_bboxes:
             label = self.assign_box(label, cent_bbox[1:], box_cls=cent_bbox[0])
 
@@ -172,7 +186,7 @@ if __name__ == "__main__":
         drop_last=False,
     )
     for im, label in data_loader:
-        label = label.swapaxes(0, -1).reshape(SCALE, SCALE, 5, -1)
+        label = label.swapaxes(0, -1).reshape(SCALE, SCALE, N_ANCHORS, -1)
         scale = label.shape[1]
         # positive_boxes = src.anchorbox.assign_anchors_inverse(SCALE, label_abs)
         label = src.anchorbox.transform_nn_output_to_coords(

@@ -26,8 +26,9 @@ class HCStairstepUpscaleBlockConfig:
     out_channels: int
 
 
+N_ANCHORS = 9
 config = [
-    CNNBlockConfig(stride=1, out_channels=32, kernel_size=3),
+    CNNBlockConfig(stride=2, out_channels=32, kernel_size=3),
     CNNBlockConfig(stride=2, out_channels=64, kernel_size=3),
     ResidualSEBlockConfig(num_repeats=1),
     CNNBlockConfig(stride=2, out_channels=128, kernel_size=3),
@@ -35,13 +36,19 @@ config = [
     CNNBlockConfig(stride=2, out_channels=256, kernel_size=3),
     ResidualSEBlockConfig(num_repeats=8, skip2end=True),
     CNNBlockConfig(stride=2, out_channels=512, kernel_size=3),
-    ResidualSEBlockConfig(num_repeats=8, skip2end=True),
-    CNNBlockConfig(stride=2, out_channels=1024, kernel_size=3),
+    # ResidualSEBlockConfig(num_repeats=8, skip2end=True),
+    # CNNBlockConfig(stride=2, out_channels=1024, kernel_size=3),
     ResidualSEBlockConfig(num_repeats=4, skip2end=True),
     HCStairstepUpscaleBlockConfig(
-        in_channels_list=[128, 256, 512, 1024], out_channels=1024
+        # in_channels_list=[128, 256, 512, 1024],
+        in_channels_list=[128, 256, 512],
+        out_channels=512,
+        # in_channels_list=[128, 256],
+        # out_channels=256,
     ),
-    CNNBlockConfig(stride=1, out_channels=(4 + 1 + N_CLASSES) * 5, kernel_size=3),
+    CNNBlockConfig(
+        stride=2, out_channels=(4 + 1 + N_CLASSES) * N_ANCHORS, kernel_size=3
+    ),
     # CNNBlockConfig(
     #     stride=2, out_channels=1024, kernel_size=3
     # ),  # 3: p, w, h of the center
@@ -151,7 +158,7 @@ class HCStairstepUpscaleBlock(torch.nn.Module):
         ]
         x = self.upscale(convoluted_f_maps[-1]) + convoluted_f_maps[-2]
         x = self.upscale(x) + convoluted_f_maps[-3]
-        x = self.upscale(x) + convoluted_f_maps[-4]
+        # x = self.upscale(x) + convoluted_f_maps[-4]
         return x
 
 

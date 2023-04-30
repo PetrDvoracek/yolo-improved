@@ -25,6 +25,8 @@ torch.backends.cudnn.benchmark = True
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
+N_ANCHORS = 9
+
 
 def log_image_with_boxes(im, gt, pred, name):
     # gt = torch.clip(gt, min=0.0)
@@ -130,7 +132,7 @@ class Trainee(pl.LightningModule):
     def configure_optimizers(self):
         # optimizer = torch.optim.Adadelta(self.model.parameters())
         optimizer = torch.optim.Adam(
-            self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            self.model.parameters(), lr=1e-4, weight_decay=self.weight_decay
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, factor=0.5, patience=50
@@ -160,7 +162,7 @@ class Trainee(pl.LightningModule):
                 .detach()
                 .cpu()
                 .swapaxes(0, -1)
-                .reshape(self.scale, self.scale, 5, -1)
+                .reshape(self.scale, self.scale, N_ANCHORS, -1)
             )
             label2show = label.detach().clone().to(self.anchors.device)
             label_inversed = src.anchorbox.transform_nn_output_to_coords(
@@ -172,12 +174,16 @@ class Trainee(pl.LightningModule):
             )
 
             pred = (
-                out[0].detach().swapaxes(0, -1).reshape(self.scale, self.scale, 5, -1)
+                out[0]
+                .detach()
+                .swapaxes(0, -1)
+                .reshape(self.scale, self.scale, N_ANCHORS, -1)
             )
             # pred = pred.swapaxes(0, 1)
             pred[..., 4] = torch.sigmoid(pred[..., 4])
             # pred[..., :2] = pred[..., :2] / self.scale
             pred2show = pred.detach().clone().to(self.anchors.device)
+            pred2show[..., 0:2] = 0.0
             pred_inversed = src.anchorbox.transform_nn_output_to_coords(
                 self.scale,
                 pred2show,
@@ -222,89 +228,144 @@ class Trainee(pl.LightningModule):
 
 def main():
     DEVICE = "cuda"
-    SCALE = 208
+    SCALE = 52
     RESOLUTION = 416
+    N_INTERPOLATIONS = 5
     # SCALE = 13
 
-    debug_transform = A.Compose(
-        [
-            A.LongestMaxSize(max_size=RESOLUTION),
-            A.PadIfNeeded(
-                min_height=RESOLUTION,
-                min_width=RESOLUTION,
-                border_mode=cv2.BORDER_CONSTANT,
-            ),
-            # A.RandomCrop(32, padding=4),
-            # A.BBoxSafeRandomCrop(),
-            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-            A.OneOf([A.Rotate(30, interpolation=x) for x in [0, 2, 3]]),
-            A.Cutout(num_holes=30, max_h_size=24, max_w_size=24),
-            A.HorizontalFlip(),
-            A.Normalize(
-                mean=[0, 0, 0],
-                std=[1, 1, 1],
-                max_pixel_value=255,
-            ),
-            ToTensorV2(),
-        ],
-        bbox_params=A.BboxParams(
-            format="yolo", min_visibility=0.4, label_fields=["labels"]
-        ),
-    )
-    debug_dataset = src.datasets.PascalVOC(
-        csv_file="/home/pedro/datasets/PASCAL_VOC/100examples.csv",
-        img_dir="/home/pedro/datasets/PASCAL_VOC/images",
-        label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
-        scale=SCALE,
-        transform=debug_transform,
-    )
-    debug_dataloader = torch.utils.data.DataLoader(
-        dataset=debug_dataset,
-        batch_size=16,
-        num_workers=8,
-        shuffle=True,
-        drop_last=False,
-        persistent_workers=True,
-        prefetch_factor=1,
-        pin_memory=True,
-    )
+    # debug_transform = A.Compose(
+    #     [
+    #         A.LongestMaxSize(max_size=RESOLUTION),
+    #         A.PadIfNeeded(
+    #             min_height=RESOLUTION,
+    #             min_width=RESOLUTION,
+    #             border_mode=cv2.BORDER_CONSTANT,
+    #         ),
+    #         # A.RandomCrop(32, padding=4),
+    #         # A.BBoxSafeRandomCrop(),
+    #         A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    #         A.OneOf([A.Rotate(30, interpolation=x) for x in [0, 2, 3]]),
+    #         A.Cutout(num_holes=30, max_h_size=24, max_w_size=24),
+    #         A.HorizontalFlip(),
+    #         A.Normalize(
+    #             max_pixel_value=255,
+    #         ),
+    #         ToTensorV2(),
+    #     ],
+    #     bbox_params=A.BboxParams(
+    #         format="yolo", min_visibility=0.0, label_fields=["labels"]
+    #     ),
+    # )
+    # debug_dataset = src.datasets.PascalVOC(
+    #     csv_file="/home/pedro/datasets/PASCAL_VOC/100examples.csv",
+    #     img_dir="/home/pedro/datasets/PASCAL_VOC/images",
+    #     label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
+    #     scale=SCALE,
+    #     transform=debug_transform,
+    # )
+    # debug_dataloader = torch.utils.data.DataLoader(
+    #     dataset=debug_dataset,
+    #     batch_size=16,
+    #     num_workers=8,
+    #     shuffle=True,
+    #     drop_last=False,
+    #     persistent_workers=True,
+    #     prefetch_factor=1,
+    #     pin_memory=True,
+    # )
 
+    # inspired from https://github.com/ultralytics/yolov5/blob/f3ee5960671f7d48c2a71cf666a97318661192af/utils/augmentations.py#L22
     train_transform = A.Compose(
         [
-            A.LongestMaxSize(max_size=RESOLUTION),
+            A.LongestMaxSize(max_size=RESOLUTION, interpolation=cv2.INTER_CUBIC),
             A.PadIfNeeded(
                 min_height=RESOLUTION,
                 min_width=RESOLUTION,
-                border_mode=cv2.BORDER_CONSTANT,
+                border_mode=0,
+                value=(0, 0, 0),
             ),
-            # A.RandomCrop(32, padding=4),
-            # A.BBoxSafeRandomCrop(),
-            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-            A.OneOf([A.Rotate(10, interpolation=x) for x in [0, 2, 3]]),
-            A.Cutout(num_holes=30, max_h_size=24, max_w_size=24),
+            A.OneOf(
+                [
+                    A.RandomResizedCrop(
+                        height=RESOLUTION,
+                        width=RESOLUTION,
+                        scale=(0.8, 1.0),
+                        ratio=(0.9, 1.1),
+                        p=1 / N_INTERPOLATIONS,
+                        interpolation=x,
+                    )
+                    for x in range(0, N_INTERPOLATIONS)
+                ],
+                p=0.5,
+            ),
+            # my
+            # A.VerticalFlip(),
             A.HorizontalFlip(),
+            A.OneOf(
+                [
+                    A.Perspective(interpolation=x, p=1 / N_INTERPOLATIONS)
+                    for x in range(0, N_INTERPOLATIONS)
+                ],
+                p=0.5,
+            ),
+            A.OneOf(
+                [
+                    A.Rotate(limit=20, interpolation=x, p=1 / N_INTERPOLATIONS)
+                    for x in range(0, N_INTERPOLATIONS)
+                ],
+                p=0.2,
+            ),
+            A.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.05),
+            A.Cutout(num_holes=30, max_h_size=24, max_w_size=24),
+            # yolov5
+            A.OneOf(
+                [
+                    A.Blur(p=1 / 4),
+                    A.MedianBlur(p=1 / 4),
+                    A.AdvancedBlur(p=1 / 4),
+                    A.GaussianBlur(p=1 / 4),
+                ],
+                p=0.3,
+            ),
+            A.ToGray(p=0.1),
+            A.CLAHE(p=0.1),
+            A.RandomGamma(p=0.3),
+            A.ImageCompression(quality_lower=70, p=0.3),  # transforms
             A.Normalize(
-                mean=[0, 0, 0],
-                std=[1, 1, 1],
                 max_pixel_value=255,
             ),
             ToTensorV2(),
         ],
         bbox_params=A.BboxParams(
-            format="yolo", min_visibility=0.1, label_fields=["labels"]
+            format="yolo", min_visibility=0.0, label_fields=["labels"]
         ),
     )
+
     train_dataset = src.datasets.PascalVOC(
         csv_file="/home/pedro/datasets/PASCAL_VOC/train.csv",
-        img_dir="/home/pedro/datasets/PASCAL_VOC/images",
-        label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
+        img_dir="/home/pedro/datasets_fast/PASCAL_VOC/images",
+        label_dir="/home/pedro/datasets_fast/PASCAL_VOC/labels",
         scale=SCALE,
         transform=train_transform,
+        anch_sizes=[
+            0.3538200855255127,
+            0.17259711027145386,
+            0.8528000116348267,
+            0.03512848913669586,
+            0.5774290561676025,
+        ],
+        anch_ratios=[
+            0.8993720412254333,
+            2.395437002182007,
+            0.4246741533279419,
+            4.431968688964844,
+            1.4753663539886475,
+        ],
     )
     train_dataloader = torch.utils.data.DataLoader(
         dataset=train_dataset,
-        batch_size=16,
-        num_workers=8,
+        batch_size=128,
+        num_workers=64,
         shuffle=True,
         drop_last=False,
         persistent_workers=True,
@@ -314,36 +375,48 @@ def main():
 
     val_transform = A.Compose(
         [
-            A.LongestMaxSize(max_size=RESOLUTION),
+            A.LongestMaxSize(max_size=RESOLUTION, interpolation=cv2.INTER_CUBIC),
             A.PadIfNeeded(
                 min_height=RESOLUTION,
                 min_width=RESOLUTION,
                 border_mode=cv2.BORDER_CONSTANT,
             ),
             A.Normalize(
-                mean=[0, 0, 0],
-                std=[1, 1, 1],
                 max_pixel_value=255,
             ),
             ToTensorV2(),
         ],
         bbox_params=A.BboxParams(
-            format="yolo", min_visibility=0.4, label_fields=["labels"]
+            format="yolo", min_visibility=0.0, label_fields=["labels"]
         ),
     )
     val_dataset = src.datasets.PascalVOC(
         csv_file="/home/pedro/datasets/PASCAL_VOC/test.csv",
-        img_dir="/home/pedro/datasets/PASCAL_VOC/images",
-        label_dir="/home/pedro/datasets/PASCAL_VOC/labels",
+        img_dir="/home/pedro/datasets_fast/PASCAL_VOC/images",
+        label_dir="/home/pedro/datasets_fast/PASCAL_VOC/labels",
         scale=SCALE,
         transform=val_transform,
-        anch_sizes=[0.7382153272628784, 0.061571717262268066, 0.343569815158844],
-        anch_ratios=[0.5068705081939697, 2.6602931022644043, 1.199582576751709],
+        # anch_sizes=[0.7382153272628784, 0.061571717262268066, 0.343569815158844],
+        # anch_ratios=[0.5068705081939697, 2.6602931022644043, 1.199582576751709],
+        anch_sizes=[
+            0.3538200855255127,
+            0.17259711027145386,
+            0.8528000116348267,
+            0.03512848913669586,
+            0.5774290561676025,
+        ],
+        anch_ratios=[
+            0.8993720412254333,
+            2.395437002182007,
+            0.4246741533279419,
+            4.431968688964844,
+            1.4753663539886475,
+        ],
     )
     val_dataloader = torch.utils.data.DataLoader(
         dataset=val_dataset,
-        batch_size=16,
-        num_workers=8,
+        batch_size=128,
+        num_workers=64,
         shuffle=True,
         drop_last=False,
         persistent_workers=True,
@@ -352,7 +425,7 @@ def main():
     )
 
     wandb_exp = wandb.init(
-        name="yolo-cls",
+        name="yolo-no-xy-small",
         project="yolo",
         entity="petrdvoracek",
         group="test",
@@ -361,6 +434,7 @@ def main():
     wandb_logger = pl.loggers.WandbLogger(experiment=wandb_exp)
 
     # pretrained_model = "./pretrained/epoch=0-step=1035.ckpt"
+    # pretrained_model = "./pretrained/checkpoint.ckpt"
     pretrained_model = ""
     try:
         trainee = Trainee.load_from_checkpoint(pretrained_model)
@@ -377,7 +451,7 @@ def main():
 
     trainer = pl.Trainer(
         gpus=1,
-        devices=[2],
+        devices=[0],
         precision=32,
         logger=wandb_logger,
         # accumulate_grad_batches=16,

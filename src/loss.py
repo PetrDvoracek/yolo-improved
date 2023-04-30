@@ -7,13 +7,41 @@ import src.anchorbox
 
 SCALE = 208
 
+N_ANCHORS = 9
+
 
 class YoloLoss(torch.nn.Module):
     def __init__(self, logfn):
         super().__init__()
         self.log = logfn
         self.bce = torch.nn.BCEWithLogitsLoss()
-        self.entropy = torch.nn.CrossEntropyLoss()
+        self.entropy = torch.nn.CrossEntropyLoss(
+            weight=torch.tensor(
+                [
+                    # from get_acnhors script
+                    0.0008539709649871904,
+                    0.0009398496240601503,
+                    0.0006230529595015577,
+                    0.0008771929824561404,
+                    0.0005668934240362812,
+                    0.0012165450121654502,
+                    0.00030609121518212427,
+                    0.0006277463904582549,
+                    0.00031725888324873094,
+                    0.0011806375442739079,
+                    0.0012135922330097086,
+                    0.0004938271604938272,
+                    0.0009328358208955224,
+                    0.0009505703422053232,
+                    7.543753771876886e-05,
+                    0.0006724949562878278,
+                    0.0009345794392523365,
+                    0.0012285012285012285,
+                    0.001081081081081081,
+                    0.0009025270758122744,
+                ]
+            )
+        )
         self.mse = torch.nn.MSELoss()
 
         self.lambda_class = 1
@@ -23,14 +51,21 @@ class YoloLoss(torch.nn.Module):
 
     def forward(self, predictions, target, anchors, stage):
         anchors = anchors.to(predictions.device)
-        batch_size = predictions.shape[0]
+        batch_size, total_features, h, w = predictions.shape
 
+        # n_anchors = N_ANCHORS
+        # features = 25
+        # predictions_reshaped = predictions.swapaxes(1, -1).reshape(-1, features)
+        # predictions_coords = torch.zeros(batch_size, w, h, n_anchors, features)
+        # predictions_coords = src.anchorbox.transform_nn_output_to_coords(
+        #     SCALE,
+        #     predictions[..., :],
+        #     anchor_p_w=anchors[..., 2],
+        #     anchor_p_h=anchors[..., 3],
+        # )
         target = target.swapaxes(1, -1).reshape(-1, 6)
         predictions = predictions.swapaxes(1, -1).reshape(-1, 25)
         anchors = anchors.swapaxes(1, -1).reshape(-1, 4).repeat(batch_size, 1)
-        # predictions_coords = src.anchorbox.transform_nn_output_to_coords(
-        #     SCALE, predictions[...,:], anchor_p_w=anchors[..., 2], anchor_p_h=anchors[..., 3]
-        # )
         obj = target[..., 4] == 1
         noobj = target[..., 4] == 0
 
@@ -61,8 +96,8 @@ class YoloLoss(torch.nn.Module):
         #     (1e-16 + target[..., 3:5] / anchors)
         # )  # width, height coordinates
         box_loss = self.mse(
-            predictions[..., 0:4][obj],
-            target[..., 0:4][obj],
+            predictions[..., 2:4][obj],
+            target[..., 2:4][obj],
         )
         self.log({f"{stage}_coords_l": box_loss.item()})
 

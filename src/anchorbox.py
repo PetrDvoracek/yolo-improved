@@ -54,7 +54,10 @@ def transform_nn_output_to_coords(scale, label, anchor_p_w, anchor_p_h):
     c_x, c_y = torch.meshgrid(torch.arange(0, scale, 1), torch.arange(0, scale, 1))
     c_x = c_x.to(label.device).unsqueeze(-1)
     c_y = c_y.to(label.device).unsqueeze(-1)
+    # c_x = c_x.to(label.device).expand(label[..., 0].shape[::-1])
+    # c_y = c_y.to(label.device).expand(label[..., 1].shape[::-1])
 
+    # TODO mozna ten label[... dela neco jineho nez predpokladam
     label[..., 0] = box_pred_center_to_coords(label[..., 0], c_x, scale)
     label[..., 1] = box_pred_center_to_coords(label[..., 1], c_y, scale)
     label[..., 2] = box_pred_size_to_coords(label[..., 2], anchor_p_w)
